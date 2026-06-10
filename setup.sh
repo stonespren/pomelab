@@ -96,7 +96,7 @@ log "Updating apt..."
 apt-get update -qq
 
 PKGS_NEEDED=()
-for pkg in curl ca-certificates gnupg lsb-release unzip; do
+for pkg in curl ca-certificates gnupg lsb-release unzip cron; do
   dpkg -s "${pkg}" &>/dev/null || PKGS_NEEDED+=("${pkg}")
 done
 if [[ ${#PKGS_NEEDED[@]} -gt 0 ]]; then
@@ -105,6 +105,9 @@ if [[ ${#PKGS_NEEDED[@]} -gt 0 ]]; then
 else
   log "Required packages already installed."
 fi
+
+log "Ensuring cron service is enabled and running..."
+systemctl enable --now cron
 
 # =============================================================================
 # 3. Docker
