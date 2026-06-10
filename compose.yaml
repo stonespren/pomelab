@@ -1,0 +1,76 @@
+# Nextcloud All-in-One + Cloudflare Tunnel
+#
+# Architecture:
+#   Cloudflare Edge (HTTPS)
+#     └── cloudflared (host network, outbound-only tunnel)
+#           └── http://localhost:11000  (AIO's Apache container, LAN-only binding)
+#                 └── nextcloud-aio-mastercontainer manages everything else
+#
+# AIO manages internally: Apache, Nextcloud, PostgreSQL, Redis, Cron, Notify Push, etc.
+# We only need two containers: the AIO mastercontainer and cloudflared.
+#
+# IMPORTANT NAMES/VOLUMES: The container_name and volume name below are hardcoded
+# by AIO and must NOT be changed, otherwise built-in backup and updates break.
+
+name: nextcloud-aio
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Nextcloud AIO mastercontainer
+  # Manages all Nextcloud sub-containers (Apache, app, DB, Redis, cron, etc.)
+  # ---------------------------------------------------------------------------
+  nextcloud-aio-mastercontainer:
+    image: ghcr.io/nextcloud-releases/all-in-one:latest
+    init: true
+    restart: always
+    container_name: nextcloud-aio-mastercontainer  # MUST NOT be changed
+    volumes:
+      - nextcloud_aio_mastercontainer:/mnt/docker-aio-config  # MUST NOT be changed
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    network_mode: bridge
+    ports:
+      # AIO admin interface — access via https://SERVER_LAN_IP:8080
+      # Always use the IP address, never the domain (HSTS will break domain access later)
+      - "8080:8080"
+      # Ports 80 and 8443 are intentionally omitted; Cloudflare Tunnel handles external TLS
+    environment:
+      # --- Reverse proxy settings (required for Cloudflare Tunnel) ---
+      # AIO's Apache binds to 127.0.0.1 only; cloudflared (host network) reaches it there
+      APACHE_PORT: "11000"
+      APACHE_IP_BINDING: "127.0.0.1"
+      # Cloudflare Tunnel blocks AIO's domain validation request — skip it
+      SKIP_DOMAIN_VALIDATION: "true"
+
+      # --- Data directory ---
+      # Set BEFORE first run; changing it later will break your installation
+      NEXTCLOUD_DATADIR: "${NEXTCLOUD_DATADIR:-/opt/nextcloud/data}"
+
+      # --- Resource limits (adjust to your hardware) ---
+      NEXTCLOUD_UPLOAD_LIMIT: "${NEXTCLOUD_UPLOAD_LIMIT:-16G}"
+      NEXTCLOUD_MAX_TIME: "${NEXTCLOUD_MAX_TIME:-3600}"
+      NEXTCLOUD_MEMORY_LIMIT: "${NEXTCLOUD_MEMORY_LIMIT:-512M}"
+
+      # --- Optional: pre-install extra apps on first boot ---
+      # NEXTCLOUD_STARTUP_APPS: "deck twofactor_totp tasks calendar contacts notes"
+
+      # --- Optional: Borg backup retention policy ---
+      # BORG_RETENTION_POLICY: "--keep-within=7d --keep-weekly=4 --keep-monthly=6"
+
+  # ---------------------------------------------------------------------------
+  # Cloudflare Tunnel
+  # Runs with host networking so it can reach AIO's Apache on 127.0.0.1:11000.
+  # The ingress rule (your-domain → http://localhost:11000) is configured in the
+  # Cloudflare Zero Trust dashboard, not here.
+  # ---------------------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: always
+    network_mode: host
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN}"
+
+volumes:
+  nextcloud_aio_mastercontainer:
+    name: nextcloud_aio_mastercontainer  # MUST NOT be changed
