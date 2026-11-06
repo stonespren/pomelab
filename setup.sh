@@ -225,6 +225,7 @@ CRON_FILE="/etc/cron.d/nextcloud-s3-sync"
 
 cat > "${CRON_FILE}" <<CRONEOF
 # Sync Nextcloud AIO Borg backup to S3 — managed by setup.sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ${CRON_LINE}
 CRONEOF
 chmod 644 "${CRON_FILE}"
@@ -256,11 +257,12 @@ docker compose -f "${SCRIPT_DIR}/compose.yaml" ps
 echo ""
 echo -e "${BOLD}Next steps:${NC}"
 echo ""
-echo "  1. Open the AIO admin interface in your browser (use IP, NOT domain):"
-echo "       https://$(hostname -I | awk '{print $1}'):8080"
+echo "  1. Open an SSH tunnel to the AIO admin interface from your own computer:"
+echo "       ssh -L 8080:127.0.0.1:8080 ${SUDO_USER:-your-user}@$(hostname -I | awk '{print $1}')"
+echo "     Then browse to https://localhost:8080"
 echo "       (Accept the self-signed certificate warning)"
 echo ""
-echo "  2. Enter your domain: ${NEXTCLOUD_DOMAIN:-cloud.yourdomain.com}"
+echo "  2. Enter your domain (e.g. cloud.yourdomain.com)"
 echo "     Then click 'Submit' — AIO will start all sub-containers automatically."
 echo ""
 echo "  3. Once Nextcloud is running, configure Borg backup in the AIO interface:"

@@ -139,16 +139,22 @@ The script will:
 
 ### Step 4 — Complete setup in the AIO interface
 
-Open a browser to the AIO admin interface using your server's **LAN IP address** (not the domain):
+The AIO admin interface only listens on the server's localhost. From your own computer, open an SSH tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@server
+```
+
+Then browse to:
 
 ```
-https://192.168.x.x:8080
+https://localhost:8080
 ```
 
-> Accept the self-signed certificate warning. Always use the IP, never the domain — HSTS will make the domain inaccessible on port 8080 later.
+> Accept the self-signed certificate warning. Never use the domain — HSTS will make the domain inaccessible on port 8080 later.
 
 1. Enter your domain (e.g. `cloud.yourdomain.com`) and click **Submit**.
-2. AIO validates the domain via Cloudflare Tunnel, then starts all containers.
+2. AIO skips domain validation, then starts all containers.
 3. Once the status shows green, click **Open your Nextcloud** to complete initial setup.
 
 ### Step 5 — Configure Borg backup in AIO
@@ -173,7 +179,7 @@ sudo ./backup-to-s3.sh
 
 ## Updating Nextcloud
 
-Updates are managed entirely through the AIO interface at `https://SERVER_IP:8080`.
+Updates are managed entirely through the AIO interface at `https://localhost:8080` (via the SSH tunnel from Step 4).
 
 1. Click **Check for updates** in the AIO interface.
 2. AIO will create a backup, apply the update, and restart all containers.
@@ -209,7 +215,7 @@ sudo ./backup-to-s3.sh
 
 1. Install Docker on the new server and copy this repo.
 2. Run `sudo ./setup.sh` — it starts the AIO mastercontainer.
-3. Open the AIO interface (`https://NEW_SERVER_IP:8080`).
+3. Open the AIO interface at `https://localhost:8080` (via the SSH tunnel from Step 4).
 4. At the initial screen, click **"Restore former AIO instance from backup"**.
 5. Enter your **Borg backup password** and the **backup directory path**.
 6. AIO will restore everything: database, files, config, apps.
@@ -272,7 +278,7 @@ docker compose down
 ## Security Notes
 
 - **No open inbound ports.** Cloudflare Tunnel uses an outbound-only connection. Your firewall needs no inbound rules for Nextcloud.
-- **AIO admin interface (port 8080) is LAN-only.** It is not routed through Cloudflare Tunnel. Keep it restricted to your LAN.
+- **AIO admin interface (port 8080) is localhost-only.** It is not routed through Cloudflare Tunnel. Reach it through an SSH tunnel.
 - **`.env` is `chmod 600`.** Contains your tokens and keys. Never commit it.
 - **Borg backup is encrypted.** Your backup password is the only thing protecting the archives — store it in a password manager.
 - **Automatic security updates:**
@@ -286,7 +292,7 @@ docker compose down
 ## Troubleshooting
 
 ### AIO interface not loading at port 8080
-Make sure you're using the server's **IP address**, not the domain. Example: `https://192.168.1.100:8080`
+Make sure your SSH tunnel is open (`ssh -L 8080:127.0.0.1:8080 user@server`) and that you're browsing to `https://localhost:8080`, not the domain.
 
 ### Domain validation fails
 This is expected with Cloudflare Tunnel — that's why `SKIP_DOMAIN_VALIDATION=true` is set. If the AIO interface still shows a validation error, double-check that:
@@ -299,8 +305,6 @@ Disable **Rocket Loader** in Cloudflare: Dashboard → your domain → Speed →
 
 ### cloudflared container keeps restarting
 ```bash
-docker logs nextcloud-aio-cloudflared
-# or if using compose:
 docker compose logs cloudflared
 ```
 Verify `CLOUDFLARE_TUNNEL_TOKEN` in `.env` matches the token in the Cloudflare dashboard.

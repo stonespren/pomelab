@@ -59,12 +59,32 @@ if [[ -z "$(ls -A "${BORG_BACKUP_DIR}" 2>/dev/null)" ]]; then
   exit 0
 fi
 
+# The sync below uses --delete, so never mirror a directory without a Borg repository
+if [[ -z "$(find "${BORG_BACKUP_DIR}" -maxdepth 2 -type f -name config -print -quit)" ]]; then
+  log "ERROR: No Borg repository found in ${BORG_BACKUP_DIR}; skipping sync."
+  exit 1
+fi
+
+# Don't copy a backup that is still being written
+borg_running() { [[ -n "$(docker ps -q --filter 'name=^nextcloud-aio-borgbackup$')" ]]; }
+
+for _ in {1..48}; do
+  borg_running || break
+  log "AIO backup still running; waiting 5 minutes..."
+  sleep 300
+done
+if borg_running; then
+  log "ERROR: AIO backup still running after 4 hours; skipping sync."
+  exit 1
+fi
+
 BACKUP_SIZE="$(du -sh "${BORG_BACKUP_DIR}" | cut -f1)"
 log "Syncing ${BORG_BACKUP_DIR} (${BACKUP_SIZE}) → s3://${S3_BUCKET}/${S3_BACKUP_PREFIX}/"
 
 aws s3 sync ${S3_ENDPOINT_ARG} \
   "${BORG_BACKUP_DIR}/" \
   "s3://${S3_BUCKET}/${S3_BACKUP_PREFIX}/" \
+  --delete \
   --storage-class STANDARD_IA \
   --no-progress
 
