@@ -1,0 +1,301 @@
+# Media stack: requests, automation, downloads and playback.
+#
+# This is a separate Compose project from compose.yaml, so the two can be
+# updated and restarted independently.
+#
+# Architecture:
+#   Cloudflare Tunnel (the cloudflared container in compose.yaml, host network)
+#     └── http://localhost:<port>  (ports are bound to MEDIA_BIND_IP)
+#           └── the apps published as <app>.MEDIA_DOMAIN
+#
+# qBittorrent has no network of its own: all its traffic goes through the gluetun
+# VPN container. Both only run under the "vpn" profile, which setup.sh enables once
+# VPN_SERVICE_PROVIDER is set, so qBittorrent can never run on the home connection.
+#
+# All values come from .env, which setup.sh fills in. Run setup.sh rather than
+# starting this file by hand on a new server.
+#
+# Everything sees the media tree at the same /data path, so imports can use
+# hardlinks and no app needs remote path mappings:
+#   /data/torrents/{incomplete,complete}
+#   /data/media/{movies,tv,audiobooks,books}
+
+name: media
+
+x-lsio-env: &lsio-env
+  PUID: "${PUID:?run setup.sh}"
+  PGID: "${PGID:?run setup.sh}"
+  TZ: "${TZ:?run setup.sh}"
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Indexers
+  # ---------------------------------------------------------------------------
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    restart: unless-stopped
+    environment:
+      <<: *lsio-env
+      PROWLARR__AUTH__APIKEY: "${PROWLARR_API_KEY:?run setup.sh}"
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/prowlarr:/config
+    ports:
+      - "${MEDIA_BIND_IP:?run setup.sh}:${PROWLARR_PORT:?run setup.sh}:9696"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks: [media]
+
+  # Has no authentication of its own, so it is only reachable on the Docker network.
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+      TZ: "${TZ:?run setup.sh}"
+    networks: [media]
+
+  # ---------------------------------------------------------------------------
+  # Downloads
+  # ---------------------------------------------------------------------------
+  # The firewall blocks everything outside the VPN tunnel, including when it drops.
+  gluetun:
+    image: qmcgaw/gluetun:v3
+    container_name: gluetun
+    profiles: [vpn]
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TZ: "${TZ:?run setup.sh}"
+      VPN_SERVICE_PROVIDER: "${VPN_SERVICE_PROVIDER:-}"
+      VPN_TYPE: "${VPN_TYPE:-wireguard}"
+      WIREGUARD_PRIVATE_KEY: "${WIREGUARD_PRIVATE_KEY:-}"
+      WIREGUARD_PRESHARED_KEY: "${WIREGUARD_PRESHARED_KEY:-}"
+      WIREGUARD_ADDRESSES: "${WIREGUARD_ADDRESSES:-}"
+      OPENVPN_USER: "${OPENVPN_USER:-}"
+      OPENVPN_PASSWORD: "${OPENVPN_PASSWORD:-}"
+      SERVER_COUNTRIES: "${SERVER_COUNTRIES:-}"
+      SERVER_CITIES: "${SERVER_CITIES:-}"
+      FIREWALL_VPN_INPUT_PORTS: "${FIREWALL_VPN_INPUT_PORTS:-}"
+      VPN_PORT_FORWARDING: "${VPN_PORT_FORWARDING:-off}"
+      # Tells qBittorrent which port the VPN forwarded. Needs bypass_local_auth,
+      # which only applies to gluetun and qBittorrent sharing this network stack.
+      VPN_PORT_FORWARDING_UP_COMMAND: >-
+        /bin/sh -c 'wget -O- -nv --retry-connrefused --post-data
+        "json={\"listen_port\":{{PORT}},\"current_network_interface\":\"{{VPN_INTERFACE}}\",\"random_port\":false,\"upnp\":false}"
+        http://127.0.0.1:${QBITTORRENT_PORT:?run setup.sh}/api/v2/app/setPreferences'
+      VPN_PORT_FORWARDING_DOWN_COMMAND: >-
+        /bin/sh -c 'wget -O- -nv --retry-connrefused --post-data
+        "json={\"listen_port\":0,\"current_network_interface\":\"lo\"}"
+        http://127.0.0.1:${QBITTORRENT_PORT:?run setup.sh}/api/v2/app/setPreferences'
+    ports:
+      # qBittorrent's web UI, published here because it shares this container's network.
+      - "${MEDIA_BIND_IP:?run setup.sh}:${QBITTORRENT_PORT:?run setup.sh}:${QBITTORRENT_PORT:?run setup.sh}"
+    networks:
+      media:
+        # Other containers keep reaching qBittorrent as qbittorrent:<port>.
+        aliases: [qbittorrent]
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    profiles: [vpn]
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+    environment:
+      <<: *lsio-env
+      WEBUI_PORT: "${QBITTORRENT_PORT:?run setup.sh}"
+      TORRENTING_PORT: "${QBITTORRENT_TORRENT_PORT:?run setup.sh}"
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/qbittorrent:/config
+      - ${MEDIA_DATA_DIR:?run setup.sh}:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sS", "-o", "/dev/null", "http://localhost:${QBITTORRENT_PORT:?run setup.sh}"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Automation
+  # ---------------------------------------------------------------------------
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    restart: unless-stopped
+    environment:
+      <<: *lsio-env
+      SONARR__AUTH__APIKEY: "${SONARR_API_KEY:?run setup.sh}"
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/sonarr:/config
+      - ${MEDIA_DATA_DIR:?run setup.sh}:/data
+    ports:
+      - "${MEDIA_BIND_IP:?run setup.sh}:${SONARR_PORT:?run setup.sh}:8989"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks: [media]
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    restart: unless-stopped
+    environment:
+      <<: *lsio-env
+      RADARR__AUTH__APIKEY: "${RADARR_API_KEY:?run setup.sh}"
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/radarr:/config
+      - ${MEDIA_DATA_DIR:?run setup.sh}:/data
+    ports:
+      - "${MEDIA_BIND_IP:?run setup.sh}:${RADARR_PORT:?run setup.sh}:7878"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    networks: [media]
+
+  # Starts in test mode: it only logs what it would remove until
+  # DECLUTTARR_TEST_RUN is set to false in .env.
+  decluttarr:
+    image: ghcr.io/manimatter/decluttarr:latest
+    container_name: decluttarr
+    profiles: [vpn]
+    restart: unless-stopped
+    depends_on: [sonarr, radarr, qbittorrent]
+    environment:
+      <<: *lsio-env
+      LOG_LEVEL: INFO
+      TEST_RUN: "${DECLUTTARR_TEST_RUN:?run setup.sh}"
+      TIMER: "10"
+      REMOVE_FAILED_DOWNLOADS: "true"
+      REMOVE_FAILED_IMPORTS: "true"
+      REMOVE_METADATA_MISSING: "true"
+      REMOVE_SLOW: "true"
+      REMOVE_STALLED: "true"
+      SONARR: >
+        - base_url: "http://sonarr:8989"
+          api_key: "${SONARR_API_KEY:?run setup.sh}"
+      RADARR: >
+        - base_url: "http://radarr:7878"
+          api_key: "${RADARR_API_KEY:?run setup.sh}"
+      QBITTORRENT: >
+        - base_url: "http://qbittorrent:${QBITTORRENT_PORT:?run setup.sh}"
+          username: "${MEDIA_ADMIN_USER:?run setup.sh}"
+          password: "${MEDIA_ADMIN_PASSWORD:?run setup.sh}"
+    networks: [media]
+
+  # ---------------------------------------------------------------------------
+  # Requests
+  # ---------------------------------------------------------------------------
+  seerr:
+    image: ghcr.io/seerr-team/seerr:latest
+    container_name: seerr
+    init: true
+    restart: unless-stopped
+    depends_on: [sonarr, radarr, jellyfin]
+    environment:
+      TZ: "${TZ:?run setup.sh}"
+      PORT: "5055"
+    volumes:
+      # The image runs as UID 1000 whatever PUID is; setup.sh owns this directory to match.
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/seerr:/app/config
+    ports:
+      - "${MEDIA_BIND_IP:?run setup.sh}:${SEERR_PORT:?run setup.sh}:5055"
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/settings/public || exit 1
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges
+    cap_drop:
+      - ALL
+    networks: [media]
+
+  # Audiobook requests. Its setup wizard needs Prowlarr indexers and an
+  # Audiobookshelf API token, so it is finished by hand (see NEXT_STEPS.md).
+  readmeabook:
+    image: ghcr.io/kikootwo/readmeabook:latest
+    container_name: readmeabook
+    restart: unless-stopped
+    # Must stay above the 80s worst case for stopping its internal app, Redis and PostgreSQL.
+    stop_grace_period: 90s
+    depends_on: [prowlarr, audiobookshelf]
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/readmeabook/config:/app/config
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/readmeabook/cache:/app/cache
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/readmeabook/pgdata:/var/lib/postgresql/data
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/readmeabook/redis:/var/lib/redis
+      - ${MEDIA_DATA_DIR:?run setup.sh}:/data
+    ports:
+      - "${MEDIA_BIND_IP:?run setup.sh}:${READMEABOOK_PORT:?run setup.sh}:3030"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3030/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks: [media]
+
+  # ---------------------------------------------------------------------------
+  # Playback
+  # ---------------------------------------------------------------------------
+  jellyfin:
+    image: lscr.io/linuxserver/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/jellyfin:/config
+      - ${MEDIA_DATA_DIR:?run setup.sh}/media:/data/media
+    ports:
+      - "${MEDIA_BIND_IP:?run setup.sh}:${JELLYFIN_PORT:?run setup.sh}:8096"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8096/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 8
+      start_period: 60s
+    networks: [media]
+
+  audiobookshelf:
+    image: ghcr.io/advplyr/audiobookshelf:latest
+    container_name: audiobookshelf
+    restart: unless-stopped
+    user: "${PUID:?run setup.sh}:${PGID:?run setup.sh}"
+    environment:
+      TZ: "${TZ:?run setup.sh}"
+      PORT: "13378"
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/audiobookshelf/config:/config
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/audiobookshelf/metadata:/metadata
+      - ${MEDIA_DATA_DIR:?run setup.sh}/media:/data/media
+    ports:
+      - "${MEDIA_BIND_IP:?run setup.sh}:${AUDIOBOOKSHELF_PORT:?run setup.sh}:13378"
+    networks: [media]
+
+networks:
+  media:
+    name: media
