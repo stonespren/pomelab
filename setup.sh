@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# setup.sh — Idempotent server setup for Debian: Nextcloud AIO, Cloudflare Tunnel
-# and the media stack.
+# setup.sh — Set up or update the server: Nextcloud AIO, the media stack, the
+# Cloudflare Tunnel that publishes them, and offsite backups. Debian 12.
 #
-# Safe to run multiple times. Skips steps that are already done.
-# Run as root (or with sudo).
-#
-# Whatever still needs a person is written to NEXT_STEPS.md, which is rebuilt on
-# every run so it only lists what is still outstanding.
-#
-# Usage:
+# Fill in the "Required" section of .env first (copy .env.example), then:
 #   sudo ./setup.sh
 #
+# Safe to run any number of times: it brings everything in line with .env, pulls
+# newer images and leaves what is already right alone. Whatever still needs a
+# person is written to NEXT_STEPS.md, which is rebuilt on every run.
 # =============================================================================
 set -euo pipefail
 
@@ -23,48 +20,24 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 log()    { echo -e "${GREEN}[setup]${NC} $*"; }
 warn()   { echo -e "${YELLOW}[setup]${NC} WARN: $*"; }
-info()   { echo -e "${CYAN}[setup]${NC} $*"; }
 fail()   { echo -e "${RED}[setup]${NC} ERROR: $*" >&2; exit 1; }
 header() { echo -e "\n${BOLD}${CYAN}=== $* ===${NC}"; }
 
-# =============================================================================
-# 0. Privilege check
-# =============================================================================
-if [[ "${EUID}" -ne 0 ]]; then
-  fail "Please run as root: sudo ./setup.sh"
-fi
+# Manual steps collected along the way and written to NEXT_STEPS.md at the end
+NEXT_STEPS=()
+note() { NEXT_STEPS+=("$1"); }
+
+[[ "${EUID}" -eq 0 ]] || fail "Please run as root: sudo ./setup.sh"
 
 # =============================================================================
-# 1. Load or interactively build .env
+# 1. Configuration
 # =============================================================================
-header "Environment Configuration"
-
-prompt_var() {
-  local var_name="$1"
-  local prompt_text="$2"
-  local default_val="${3:-}"
-  local secret="${4:-false}"
-  local current_val="${!var_name:-}"
-
-  [[ -n "${current_val}" ]] && return 0
-
-  if [[ "${secret}" == "true" ]]; then
-    read -rsp "  ${prompt_text} [${default_val:-(required)}]: " input_val
-    echo ""
-  else
-    read -rp "  ${prompt_text} [${default_val:-(required)}]: " input_val
-  fi
-
-  input_val="${input_val:-${default_val}}"
-  [[ -z "${input_val}" ]] && fail "${var_name} is required."
-
-  set_env_var "${var_name}" "${input_val}"
-}
+header "Configuration"
 
 set_env_var() {
   local var_name="$1" value="$2" escaped
   export "${var_name}=${value}"
-  if grep -q "^${var_name}=" "${ENV_FILE}" 2>/dev/null; then
+  if grep -q "^${var_name}=" "${ENV_FILE}"; then
     escaped="$(printf '%s' "${value}" | sed 's/[\\&|]/\\&/g')"
     sed -i "s|^${var_name}=.*|${var_name}=${escaped}|" "${ENV_FILE}"
   else
@@ -74,11 +47,12 @@ set_env_var() {
   fi
 }
 
-# Fill in a value that needs no decision from the user, keeping any existing one
+# Write a value that needs no decision to .env, keeping any already there. This
+# checks the file rather than the environment: sudo passes some variables, such
+# as TZ, through, and they must still end up in .env for later `docker compose`.
+# A value from the environment is kept in preference to the default.
 default_var() {
-  local var_name="$1" default_val="$2"
-  [[ -n "${!var_name:-}" ]] && return 0
-  set_env_var "${var_name}" "${default_val}"
+  grep -q "^$1=." "${ENV_FILE}" || set_env_var "$1" "${!1:-$2}"
 }
 
 random_hex() { od -An -N16 -tx1 /dev/urandom | tr -d ' \n'; }
@@ -91,319 +65,243 @@ detect_timezone() {
 }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-  [[ -f "${SCRIPT_DIR}/.env.example" ]] && cp "${SCRIPT_DIR}/.env.example" "${ENV_FILE}" || touch "${ENV_FILE}"
-  log "Created .env"
+  cp "${SCRIPT_DIR}/.env.example" "${ENV_FILE}"
+  chmod 600 "${ENV_FILE}"
+  fail "Created .env from .env.example. Fill in its \"Required\" section, then run setup.sh again."
 fi
-
+chmod 600 "${ENV_FILE}"
 set -a; source "${ENV_FILE}"; set +a
 
-# Manual steps collected along the way and written to NEXT_STEPS.md at the end
-NEXT_STEPS=()
-note() { NEXT_STEPS+=("$1"); }
+missing=()
+for var in DOMAIN CLOUDFLARE_API_TOKEN ACCESS_EMAIL \
+           S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_REGION; do
+  [[ -n "${!var:-}" ]] || missing+=("${var}")
+done
+[[ ${#missing[@]} -eq 0 ]] || fail "Set these in ${ENV_FILE}, then run setup.sh again: ${missing[*]}"
 
-info "Checking required configuration values..."
-
-prompt_var "CLOUDFLARE_TUNNEL_TOKEN"  "Cloudflare Tunnel token"                   ""
-prompt_var "NEXTCLOUD_DATADIR"        "Nextcloud data directory on host"           "/opt/nextcloud/data"
-prompt_var "NEXTCLOUD_UPLOAD_LIMIT"   "Max upload size"                            "16G"
-prompt_var "NEXTCLOUD_MAX_TIME"       "PHP max execution time (seconds)"           "3600"
-prompt_var "NEXTCLOUD_MEMORY_LIMIT"   "PHP memory limit per process"               "512M"
-prompt_var "BORG_BACKUP_DIR"          "Local Borg backup directory (for S3 sync)"  "/opt/nextcloud/borg-backup"
-prompt_var "AWS_ACCESS_KEY_ID"        "AWS/S3 Access Key ID"                       ""
-prompt_var "AWS_SECRET_ACCESS_KEY"    "AWS/S3 Secret Access Key"                   "" "true"
-prompt_var "S3_REGION"                "S3 region"                                  "us-east-1"
-prompt_var "S3_BUCKET"                "S3 bucket name for backups"                 ""
-prompt_var "S3_BACKUP_PREFIX"         "S3 key prefix / folder"                     "nextcloud-borg"
-prompt_var "MEDIA_DATA_DIR"           "Media and downloads directory on host"      "/opt/media/data"
-
-# Everything below has a sensible value, so it is filled in without asking.
-# Change any of these in .env and re-run setup.sh.
-default_var "MEDIA_CONFIG_DIR"         "/opt/media/config"
-default_var "MEDIA_BIND_IP"            "127.0.0.1"
-default_var "PUID"                     "${SUDO_UID:-1000}"
-default_var "PGID"                     "${SUDO_GID:-1000}"
-default_var "TZ"                       "$(detect_timezone)"
-default_var "PROWLARR_PORT"            "8109"
-default_var "QBITTORRENT_PORT"         "8133"
-default_var "QBITTORRENT_TORRENT_PORT" "6881"
-default_var "SONARR_PORT"              "8098"
-default_var "RADARR_PORT"              "8088"
-default_var "SEERR_PORT"               "5055"
-default_var "JELLYFIN_PORT"            "8091"
-default_var "AUDIOBOOKSHELF_PORT"      "13378"
-default_var "READMEABOOK_PORT"         "3030"
-default_var "DECLUTTARR_TEST_RUN"      "true"
-default_var "VPN_TYPE"                 "wireguard"
-default_var "VPN_PORT_FORWARDING"      "off"
-default_var "MEDIA_ADMIN_USER"         "admin"
-default_var "MEDIA_ADMIN_PASSWORD"     "$(random_hex)"
-default_var "SONARR_API_KEY"           "$(random_hex)"
-default_var "RADARR_API_KEY"           "$(random_hex)"
-default_var "PROWLARR_API_KEY"         "$(random_hex)"
+default_var NEXTCLOUD_DATADIR        /opt/nextcloud/data
+default_var BORG_BACKUP_DIR          /opt/nextcloud/borg-backup
+default_var S3_PREFIX                nextcloud-borg
+default_var MEDIA_DATA_DIR           /opt/media/data
+default_var MEDIA_CONFIG_DIR         /opt/media/config
+default_var NEXTCLOUD_UPLOAD_LIMIT   16G
+default_var NEXTCLOUD_MAX_TIME       3600
+default_var NEXTCLOUD_MEMORY_LIMIT   512M
+default_var MEDIA_BIND_IP            127.0.0.1
+default_var DECLUTTARR_TEST_RUN      true
+default_var QBITTORRENT_TORRENT_PORT 6881
+default_var TUNNEL_NAME              "$(uname -n | cut -d. -f1)"
+default_var PUID                     "${SUDO_UID:-1000}"
+default_var PGID                     "${SUDO_GID:-1000}"
+default_var TZ                       "$(detect_timezone)"
+default_var MEDIA_ADMIN_USER         admin
+default_var MEDIA_ADMIN_PASSWORD     "$(random_hex)"
+default_var SONARR_API_KEY           "$(random_hex)"
+default_var RADARR_API_KEY           "$(random_hex)"
+default_var PROWLARR_API_KEY         "$(random_hex)"
 
 # qBittorrent only runs under this profile, so it can't start without a VPN
-if [[ -n "${VPN_SERVICE_PROVIDER:-}" ]]; then
-  set_env_var "COMPOSE_PROFILES" "vpn"
-else
-  set_env_var "COMPOSE_PROFILES" ""
-fi
+set_env_var COMPOSE_PROFILES "$([[ -n "${VPN_SERVICE_PROVIDER:-}" ]] && echo vpn || true)"
 
-set -a; source "${ENV_FILE}"; set +a
-chmod 600 "${ENV_FILE}"
-log ".env configured (chmod 600)"
+# The apps' host ports. These must match compose.yaml.
+PROWLARR_PORT=9696
+QBITTORRENT_PORT=8090
+SONARR_PORT=8989
+RADARR_PORT=7878
+SEERR_PORT=5055
+JELLYFIN_PORT=8096
+AUDIOBOOKSHELF_PORT=13378
+READMEABOOK_PORT=3030
+
+# Where this server, and cloudflared on its host network, reach the app ports
+MEDIA_HOST="${MEDIA_BIND_IP}"
+[[ "${MEDIA_HOST}" == "0.0.0.0" ]] && MEDIA_HOST="127.0.0.1"
+
+log ".env is complete."
 
 # =============================================================================
 # 2. System packages
 # =============================================================================
 header "System Packages"
 
-log "Updating apt..."
+# Never stop to ask a package's configuration questions
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-
 PKGS_NEEDED=()
-for pkg in curl ca-certificates gnupg jq lsb-release unzip cron; do
+for pkg in curl ca-certificates jq rclone unattended-upgrades; do
   dpkg -s "${pkg}" &>/dev/null || PKGS_NEEDED+=("${pkg}")
 done
 if [[ ${#PKGS_NEEDED[@]} -gt 0 ]]; then
   log "Installing: ${PKGS_NEEDED[*]}"
   apt-get install -y -qq "${PKGS_NEEDED[@]}"
-else
-  log "Required packages already installed."
 fi
 
-log "Ensuring cron service is enabled and running..."
-systemctl enable --now cron
+# Daily security updates
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
+log "Packages ready; automatic security updates on."
 
 # =============================================================================
 # 3. Docker
 # =============================================================================
 header "Docker"
 
-install_docker() {
+if ! command -v docker &>/dev/null; then
   log "Installing Docker CE..."
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg \
-    -o /etc/apt/keyrings/docker.asc
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
   chmod a+r /etc/apt/keyrings/docker.asc
-
-  echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
-https://download.docker.com/linux/debian \
-$(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
-    | tee /etc/apt/sources.list.d/docker.list > /dev/null
-
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+https://download.docker.com/linux/debian $(. /etc/os-release && echo "${VERSION_CODENAME}") stable" \
+    > /etc/apt/sources.list.d/docker.list
   apt-get update -qq
-  apt-get install -y -qq \
-    docker-ce docker-ce-cli containerd.io \
-    docker-buildx-plugin docker-compose-plugin
-
-  systemctl enable docker
-  systemctl start docker
-  log "Docker installed."
-}
-
-if ! command -v docker &>/dev/null; then
-  install_docker
-else
-  log "Docker already installed: $(docker --version)"
+  apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 fi
-
-if ! docker compose version &>/dev/null; then
-  apt-get install -y -qq docker-compose-plugin
-fi
-log "Docker Compose: $(docker compose version --short)"
-
-# Add the invoking user to the docker group
-if [[ -n "${SUDO_USER:-}" ]] && ! groups "${SUDO_USER}" | grep -q docker; then
-  usermod -aG docker "${SUDO_USER}"
-  warn "Added ${SUDO_USER} to the docker group. Log out and back in for this to take effect."
-fi
+systemctl enable --now docker >/dev/null
+# The plugin only exists in Docker's repository, not Debian's docker.io packages
+docker compose version &>/dev/null || apt-get install -y -qq docker-compose-plugin \
+  || fail "Docker Compose v2 is missing. Remove Debian's docker.io package and re-run setup.sh, which then installs Docker from Docker's repository."
+log "$(docker --version), Compose $(docker compose version --short)"
 
 # =============================================================================
-# 4. AWS CLI v2
-# =============================================================================
-header "AWS CLI"
-
-install_awscli() {
-  local arch url tmp_dir
-  arch="$(uname -m)"
-  case "${arch}" in
-    x86_64)  url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"   ;;
-    aarch64) url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip"  ;;
-    *)       fail "Unsupported architecture for AWS CLI: ${arch}" ;;
-  esac
-  log "Downloading AWS CLI v2 (${arch})..."
-  tmp_dir="$(mktemp -d)"
-  curl -fsSL "${url}" -o "${tmp_dir}/awscliv2.zip"
-  unzip -q "${tmp_dir}/awscliv2.zip" -d "${tmp_dir}"
-  "${tmp_dir}/aws/install" --update
-  rm -rf "${tmp_dir}"
-  log "AWS CLI installed: $(aws --version 2>&1 | head -1)"
-}
-
-if ! command -v aws &>/dev/null; then
-  install_awscli
-else
-  log "AWS CLI already installed: $(aws --version 2>&1 | head -1)"
-fi
-
-# =============================================================================
-# 5. Create data/backup directories
+# 4. Directories
 # =============================================================================
 header "Directories"
 
-for dir in "${NEXTCLOUD_DATADIR}" "${BORG_BACKUP_DIR}"; do
-  if [[ ! -d "${dir}" ]]; then
-    mkdir -p "${dir}"
-    log "Created: ${dir}"
-  else
-    log "Exists:  ${dir}"
-  fi
-done
-# The data dir needs to be writable by the AIO containers (they'll set perms internally)
-chmod 750 "${NEXTCLOUD_DATADIR}"
+# AIO takes over the data directory's owner and mode, so only set them on creation.
+if [[ ! -d "${NEXTCLOUD_DATADIR}" ]]; then
+  mkdir -p "${NEXTCLOUD_DATADIR}"
+  chmod 750 "${NEXTCLOUD_DATADIR}"
+fi
+mkdir -p "${BORG_BACKUP_DIR}"
 
 # Only these directories are chowned, never their contents: the apps manage their
 # own files, and a recursive chown of a media library can take hours.
 # readmeabook's directories are created and owned by its own entrypoint.
 for dir in \
   "${MEDIA_CONFIG_DIR}" \
-  "${MEDIA_CONFIG_DIR}"/{prowlarr,qbittorrent,sonarr,radarr,jellyfin} \
+  "${MEDIA_CONFIG_DIR}"/{prowlarr,qbittorrent,sonarr,radarr,jellyfin,audiobookshelf} \
   "${MEDIA_CONFIG_DIR}"/audiobookshelf/{config,metadata} \
   "${MEDIA_DATA_DIR}" \
+  "${MEDIA_DATA_DIR}"/{torrents,media} \
   "${MEDIA_DATA_DIR}"/torrents/{incomplete,complete} \
   "${MEDIA_DATA_DIR}"/media/{movies,tv,audiobooks,books}; do
   mkdir -p "${dir}"
   chown "${PUID}:${PGID}" "${dir}"
 done
-chown "${PUID}:${PGID}" "${MEDIA_CONFIG_DIR}/audiobookshelf" "${MEDIA_DATA_DIR}/torrents" "${MEDIA_DATA_DIR}/media"
 
 # The Seerr image always runs as UID 1000
 mkdir -p "${MEDIA_CONFIG_DIR}/seerr"
 chown 1000:1000 "${MEDIA_CONFIG_DIR}/seerr"
-log "Media directories ready under ${MEDIA_CONFIG_DIR} and ${MEDIA_DATA_DIR}"
+log "Ready: ${NEXTCLOUD_DATADIR}, ${BORG_BACKUP_DIR}, ${MEDIA_CONFIG_DIR}, ${MEDIA_DATA_DIR}"
 
 # =============================================================================
-# 6. Pull images and start the stack
+# 5. Cloudflare Tunnel, routes, DNS and Access
 # =============================================================================
-header "Starting Nextcloud AIO Stack"
+header "Cloudflare"
 
-log "Pulling latest images..."
-docker compose -f "${SCRIPT_DIR}/compose.yaml" pull
+source "${SCRIPT_DIR}/configure-cloudflare.sh"
+configure_cloudflare
 
-log "Starting containers..."
-docker compose -f "${SCRIPT_DIR}/compose.yaml" up -d --remove-orphans
+# =============================================================================
+# 6. Start everything
+# =============================================================================
+header "Containers"
 
-log "Stack started."
-
-header "Starting Media Stack"
-
-log "Pulling latest images..."
-docker compose -f "${SCRIPT_DIR}/compose.media.yaml" pull
-
-log "Starting containers..."
+COMPOSE=(docker compose --project-directory "${SCRIPT_DIR}")
+log "Pulling images..."
+"${COMPOSE[@]}" pull --quiet
 # gluetun stays unhealthy with bad VPN settings, which fails this command. That
 # keeps qBittorrent stopped but shouldn't stop the rest of setup.
-if docker compose -f "${SCRIPT_DIR}/compose.media.yaml" up -d --remove-orphans; then
-  log "Media stack started."
+if "${COMPOSE[@]}" up -d --remove-orphans; then
+  log "All containers started."
 else
-  warn "Not every media container started."
-  note "Some media containers did not start. Check \`docker compose -f compose.media.yaml ps\`. If gluetun is unhealthy, check \`docker logs gluetun\` and your VPN settings in \`.env\`."
+  warn "Not every container started."
+  note "Some containers did not start. Check \`sudo docker compose ps\`. If gluetun is unhealthy, check \`sudo docker logs gluetun\` and the VPN settings in \`.env\`."
 fi
 
 # =============================================================================
-# 7. Cron job: sync AIO's Borg backup to S3
+# 7. Daily offsite backup
 # =============================================================================
-header "S3 Backup Sync Cron"
+header "Offsite Backup"
 
-SYNC_SCRIPT="${SCRIPT_DIR}/backup-to-s3.sh"
-chmod +x "${SYNC_SCRIPT}"
+BACKUP_UNIT=nextcloud-offsite-backup
+chmod +x "${SCRIPT_DIR}/backup-to-s3.sh"
 
-# Sync to S3 daily at 04:00 (after AIO's typical 03:xx backup window)
-CRON_LINE="0 4 * * * root ${SYNC_SCRIPT} >> /var/log/nextcloud-s3-sync.log 2>&1"
-CRON_FILE="/etc/cron.d/nextcloud-s3-sync"
+cat > "/etc/systemd/system/${BACKUP_UNIT}.service" <<EOF
+# Managed by setup.sh
+[Unit]
+Description=Copy Nextcloud AIO backups to S3
+Wants=network-online.target
+After=network-online.target docker.service
 
-cat > "${CRON_FILE}" <<CRONEOF
-# Sync Nextcloud AIO Borg backup to S3 — managed by setup.sh
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-${CRON_LINE}
-CRONEOF
-chmod 644 "${CRON_FILE}"
-log "S3 sync cron job written to ${CRON_FILE}"
+[Service]
+Type=oneshot
+ExecStart=${SCRIPT_DIR}/backup-to-s3.sh
+EOF
 
-touch /var/log/nextcloud-s3-sync.log
-chmod 640 /var/log/nextcloud-s3-sync.log
+# After AIO's daily backup, which NEXT_STEPS.md suggests scheduling for 03:00
+cat > "/etc/systemd/system/${BACKUP_UNIT}.timer" <<EOF
+# Managed by setup.sh
+[Unit]
+Description=Daily offsite copy of Nextcloud AIO backups
 
-cat > /etc/logrotate.d/nextcloud-s3-sync <<ROTEOF
-/var/log/nextcloud-s3-sync.log {
-    weekly
-    rotate 8
-    compress
-    delaycompress
-    missingok
-    notifempty
-}
-ROTEOF
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now "${BACKUP_UNIT}.timer" >/dev/null
+log "Daily copy to s3://${S3_BUCKET}/${S3_PREFIX}/ scheduled for 04:00."
 
 # =============================================================================
 # 8. Configure the media apps
 # =============================================================================
-header "Configuring Media Apps"
+header "Media Apps"
 
 source "${SCRIPT_DIR}/configure-media.sh"
 configure_media
 
 # =============================================================================
-# 9. Work out what is left for a person to do
+# 9. What is left for a person to do
 # =============================================================================
 ssh_target="${SUDO_USER:-your-user}@$(hostname -I | awk '{print $1}')"
-media_forwards=""
-for port in "${PROWLARR_PORT}" "${QBITTORRENT_PORT}" "${SONARR_PORT}" "${RADARR_PORT}" \
-            "${SEERR_PORT}" "${JELLYFIN_PORT}" "${AUDIOBOOKSHELF_PORT}" "${READMEABOOK_PORT}"; do
-  media_forwards+=" -L ${port}:${MEDIA_BIND_IP/#0.0.0.0/127.0.0.1}:${port}"
-done
 
 NEXTCLOUD_STEPS=()
 if [[ -z "$(docker ps -q --filter 'name=^nextcloud-aio-apache$')" ]]; then
-  NEXTCLOUD_STEPS+=("In the Cloudflare Zero Trust dashboard, add a public hostname to the tunnel for Nextcloud: type \`HTTP\`, URL \`localhost:11000\`.")
-  NEXTCLOUD_STEPS+=("Turn off Rocket Loader for your domain: Cloudflare Dashboard > your domain > Speed > Optimization > Content Optimization. Nextcloud's login page breaks without this.")
-  NEXTCLOUD_STEPS+=("Open the AIO interface and enter your domain. AIO then starts the Nextcloud containers. Tunnel: \`ssh -L 8080:127.0.0.1:8080 ${ssh_target}\`, then browse to https://localhost:8080 and accept the certificate warning.")
+  NEXTCLOUD_STEPS+=("Open the AIO interface and enter \`cloud.${DOMAIN}\` as the domain. AIO then starts Nextcloud. It is only reachable over SSH: run \`ssh -L 8080:127.0.0.1:8080 ${ssh_target}\`, browse to https://localhost:8080 and accept the certificate warning.")
 fi
 if [[ -z "$(find "${BORG_BACKUP_DIR}" -maxdepth 2 -type f -name config -print -quit 2>/dev/null)" ]]; then
-  NEXTCLOUD_STEPS+=("In the AIO interface, set the backup directory to \`${BORG_BACKUP_DIR}\`, store the backup password somewhere safe, enable daily backups (e.g. 03:00) and create the first backup.")
+  NEXTCLOUD_STEPS+=("In the AIO interface, set the backup directory to \`${BORG_BACKUP_DIR}\`, store the backup password in a password manager, schedule daily backups for 03:00 and create the first backup.")
 fi
-if ! grep -q "Sync complete" /var/log/nextcloud-s3-sync.log 2>/dev/null; then
-  NEXTCLOUD_STEPS+=("After the first AIO backup, test the offsite sync: \`sudo ${SYNC_SCRIPT}\`")
+if [[ ! -f /var/lib/nextcloud-offsite-backup/last-success ]]; then
+  NEXTCLOUD_STEPS+=("After the first AIO backup, test the offsite copy: \`sudo systemctl start ${BACKUP_UNIT}\`, then check \`journalctl -u ${BACKUP_UNIT}\` ends with \"Sync complete\".")
 fi
 
-write_list() {
-  local item
-  for item in "$@"; do echo "- [ ] ${item}"; done
-}
+write_list() { local item; for item in "$@"; do echo "- [ ] ${item}"; done; }
 
 {
   echo "# Next steps"
   echo ""
   echo "Generated by setup.sh on $(date '+%Y-%m-%d %H:%M'). Re-run setup.sh to refresh this list."
   echo ""
-  echo "## Reaching the media apps"
+  echo "## Addresses"
   echo ""
-  echo "Their ports are only bound to ${MEDIA_BIND_IP}. From your own computer:"
-  echo ""
-  echo "    ssh${media_forwards} ${ssh_target}"
-  echo ""
-  echo "Then use the \`http://localhost:<port>\` addresses below. Sign in with \`MEDIA_ADMIN_USER\` and \`MEDIA_ADMIN_PASSWORD\` from \`.env\`."
+  echo "Media apps sign in with \`MEDIA_ADMIN_USER\` and \`MEDIA_ADMIN_PASSWORD\` from \`.env\`. The admin apps also ask for a Cloudflare Access code sent to \`${ACCESS_EMAIL}\`."
   echo ""
   echo "| App | Address |"
   echo "|---|---|"
-  echo "| Jellyfin | http://localhost:${JELLYFIN_PORT} |"
-  echo "| Seerr | http://localhost:${SEERR_PORT} |"
-  echo "| Audiobookshelf | http://localhost:${AUDIOBOOKSHELF_PORT} |"
-  echo "| ReadMeABook | http://localhost:${READMEABOOK_PORT} |"
-  echo "| Sonarr | http://localhost:${SONARR_PORT} |"
-  echo "| Radarr | http://localhost:${RADARR_PORT} |"
-  echo "| Prowlarr | http://localhost:${PROWLARR_PORT} |"
-  echo "| qBittorrent | http://localhost:${QBITTORRENT_PORT} |"
+  echo "| Nextcloud | https://cloud.${DOMAIN} |"
+  for app in Jellyfin Seerr Audiobookshelf ReadMeABook Sonarr Radarr Prowlarr qBittorrent; do
+    echo "| ${app} | https://${app,,}.${DOMAIN} |"
+  done
+  echo "| AIO interface | https://localhost:8080 over \`ssh -L 8080:127.0.0.1:8080 ${ssh_target}\` |"
   if [[ ${#NEXTCLOUD_STEPS[@]} -gt 0 ]]; then
     echo ""
     echo "## Nextcloud"
@@ -412,15 +310,9 @@ write_list() {
   fi
   if [[ ${#NEXT_STEPS[@]} -gt 0 ]]; then
     echo ""
-    echo "## Media stack"
+    echo "## Media and Cloudflare"
     echo ""
     write_list "${NEXT_STEPS[@]}"
-  fi
-  echo ""
-  if [[ -z "${MEDIA_DOMAIN:-}" ]]; then
-    echo "## Optional"
-    echo ""
-    echo "- [ ] To reach the apps at \`<app>.yourdomain.com\`, set \`MEDIA_DOMAIN\` and \`CLOUDFLARE_API_TOKEN\` in \`.env\` and re-run setup.sh. See README.md."
   fi
 } > "${SCRIPT_DIR}/NEXT_STEPS.md"
 chmod 600 "${SCRIPT_DIR}/NEXT_STEPS.md"
@@ -428,14 +320,10 @@ chmod 600 "${SCRIPT_DIR}/NEXT_STEPS.md"
 # =============================================================================
 # 10. Summary
 # =============================================================================
-header "Setup Complete"
+header "Done"
 
-echo ""
-echo -e "${BOLD}Running containers:${NC}"
-docker compose -f "${SCRIPT_DIR}/compose.yaml" ps
-docker compose -f "${SCRIPT_DIR}/compose.media.yaml" ps
-
+"${COMPOSE[@]}" ps
 echo ""
 cat "${SCRIPT_DIR}/NEXT_STEPS.md"
 echo ""
-echo -e "${YELLOW}Saved to ${SCRIPT_DIR}/NEXT_STEPS.md. See README.md for full documentation.${NC}"
+echo -e "${YELLOW}Saved to ${SCRIPT_DIR}/NEXT_STEPS.md. See README.md for details.${NC}"

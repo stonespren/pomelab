@@ -2,8 +2,8 @@
 # =============================================================================
 # configure-media.sh — Configure the media stack through each app's own API.
 #
-# Sourced by setup.sh, which provides log, warn, note and the values from .env.
-# Nothing runs until setup.sh calls configure_media.
+# Sourced by setup.sh, which provides log, warn, note, MEDIA_HOST, the app ports
+# and the values from .env. Nothing runs until setup.sh calls configure_media.
 #
 # Each step runs once. When it succeeds a marker is written to
 # MEDIA_CONFIG_DIR/.setup-state, and later runs leave that app alone, so changes
@@ -367,163 +367,6 @@ check_vpn() {
 }
 
 # -----------------------------------------------------------------------------
-# Cloudflare: publish apps as <app>.MEDIA_DOMAIN on the existing tunnel.
-#
-# The tunnel's config is shared with Nextcloud and the API can only replace it
-# whole, so this is strictly additive: existing rules and DNS records are never
-# edited, a tunnel config it doesn't recognise is left alone, and the result is
-# read back and rolled back if any existing rule changed. New rules name exact
-# hostnames, so they can't catch traffic meant for another hostname.
-# -----------------------------------------------------------------------------
-# Pinned because the CLI is in beta and these commands were checked against this version.
-CF_CLI_VERSION="1.0.0-beta.27"
-
-# Runs in a container so the server doesn't need Node. Credentials come from the environment.
-cf_cli() {
-  docker run --rm -e CLOUDFLARE_API_TOKEN -e CLOUDFLARE_ACCOUNT_ID \
-    -v pomelab_cf_cli_npm:/root/.npm node:22-slim \
-    npx --yes "cf@${CF_CLI_VERSION}" "$@"
-}
-
-JQ_AS_LIST='if type == "array" then . else (.result // []) end'
-
-# Print the hostname and service of every rule, for comparing configs.
-tunnel_rules() { jq -c '[.ingress[] | {hostname, path, service}]' <<<"$1"; }
-
-# Add rules to the front of the ingress list and confirm nothing else changed.
-tunnel_add_rules() {
-  local tunnel="$1" old_config="$2" new_rules="$3" new_config body current
-  new_config="$(jq -c --argjson new "${new_rules}" '.ingress = $new + .ingress' <<<"${old_config}")" || return 1
-  body="$(jq -c '{config: .}' <<<"${new_config}")" || return 1
-  cf_cli tunnels config update "${tunnel}" --body "${body}" >/dev/null || return 1
-
-  if current="$(cf_cli tunnels config get "${tunnel}" | jq -c '.result // . | .config')" \
-    && [[ "$(tunnel_rules "${current}")" == "$(tunnel_rules "${new_config}")" ]]; then
-    return 0
-  fi
-  warn "The tunnel config did not read back as expected. Restoring the previous config."
-  body="$(jq -c '{config: .}' <<<"${old_config}")" || return 1
-  cf_cli tunnels config update "${tunnel}" --body "${body}" >/dev/null \
-    || warn "RESTORE FAILED. Check the tunnel's routes in the Cloudflare dashboard now."
-  return 1
-}
-
-publish_media_hostnames() {
-  local routes=(
-    "jellyfin:${JELLYFIN_PORT}:open" "seerr:${SEERR_PORT}:open"
-    "audiobookshelf:${AUDIOBOOKSHELF_PORT}:open" "readmeabook:${READMEABOOK_PORT}:open"
-    "sonarr:${SONARR_PORT}:access" "radarr:${RADARR_PORT}:access"
-    "prowlarr:${PROWLARR_PORT}:access" "qbittorrent:${QBITTORRENT_PORT}:access"
-  )
-  local route name port kind host pending=() manual=""
-  for route in "${routes[@]}"; do
-    IFS=: read -r name port kind <<<"${route}"
-    [[ -f "${MEDIA_STATE_DIR}/hostname-${name}.${MEDIA_DOMAIN}" ]] && continue
-    if [[ "${kind}" == "access" && -z "${MEDIA_ACCESS_EMAIL:-}" ]]; then
-      note "\`${name}.${MEDIA_DOMAIN}\` was not published because its admin UI should sit behind Cloudflare Access. Set \`MEDIA_ACCESS_EMAIL\` in \`.env\` and re-run setup.sh."
-      continue
-    fi
-    pending+=("${route}")
-    manual+=$'\n'"    - \`${name}.${MEDIA_DOMAIN}\`: type \`HTTP\`, URL \`${MEDIA_HOST}:${port}\`"
-  done
-  [[ ${#pending[@]} -eq 0 ]] && return 0
-
-  manual="Add these public hostnames to the tunnel in the Cloudflare Zero Trust dashboard:${manual}"
-  if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-    note "${manual}"$'\n'"    Or set \`CLOUDFLARE_API_TOKEN\` in \`.env\` and re-run setup.sh to do this automatically."
-    return 0
-  fi
-
-  local token_json tunnel current old_config zone apps="" record new_rules='[]' add_dns=() done_hosts=()
-  # A tunnel token is base64 JSON holding the account and tunnel IDs.
-  local padded="${CLOUDFLARE_TUNNEL_TOKEN}==="
-  padded="${padded:0:$(( (${#CLOUDFLARE_TUNNEL_TOKEN} + 3) / 4 * 4 ))}"
-  if ! token_json="$(base64 -d <<<"${padded}" 2>/dev/null)" \
-    || ! tunnel="$(jq -re '.t' <<<"${token_json}")" \
-    || ! CLOUDFLARE_ACCOUNT_ID="$(jq -re '.a' <<<"${token_json}")"; then
-    warn "Could not read the account and tunnel IDs from CLOUDFLARE_TUNNEL_TOKEN."
-    note "${manual}"
-    return 0
-  fi
-  export CLOUDFLARE_ACCOUNT_ID
-
-  # Only continue with a remotely managed config that ends in its catch-all rule.
-  if ! current="$(cf_cli tunnels config get "${tunnel}")" \
-    || ! old_config="$(jq -ce '.result // . | .config
-        | select((.ingress | type) == "array" and (.ingress | length) > 0 and .ingress[-1].hostname == null)' <<<"${current}")"; then
-    warn "Left the tunnel unchanged: its current routes could not be read."
-    note "${manual}"
-    return 0
-  fi
-  if ! zone="$(cf_cli zones list --name "${MEDIA_DOMAIN}" | jq -re "${JQ_AS_LIST}"' | first(.[].id)')"; then
-    warn "Left the tunnel unchanged: Cloudflare zone ${MEDIA_DOMAIN} was not found."
-    note "${manual}"
-    return 0
-  fi
-
-  for route in "${pending[@]}"; do
-    IFS=: read -r name port kind <<<"${route}"
-    host="${name}.${MEDIA_DOMAIN}"
-
-    if ! record="$(cf_cli dns records list --zone "${zone}" --name "${host}" | jq -c "${JQ_AS_LIST}")"; then
-      warn "Skipped ${host}: could not read its DNS records."
-      note "Publish \`${host}\` by hand: type \`HTTP\`, URL \`${MEDIA_HOST}:${port}\`."
-      continue
-    fi
-    if ! jq -e --arg target "${tunnel}.cfargotunnel.com" 'all(.[]; .content == $target)' <<<"${record}" >/dev/null; then
-      warn "Skipped ${host}: it already has a DNS record pointing somewhere else."
-      note "\`${host}\` already has a different DNS record, which setup.sh won't overwrite. Remove it and re-run setup.sh, or publish this app by hand."
-      continue
-    fi
-
-    # Access goes on first, so an admin UI is never reachable without it.
-    if [[ "${kind}" == "access" ]]; then
-      if [[ -z "${apps}" ]] && ! apps="$(cf_cli zero-trust access applications list | jq -c "${JQ_AS_LIST}")"; then
-        apps=""
-        warn "Skipped ${host}: could not read Cloudflare Access applications."
-        note "\`${host}\` was not published because Cloudflare Access could not be read. Check that the API token has the Access permission, then re-run setup.sh."
-        continue
-      fi
-      if ! jq -e --arg host "${host}" 'any(.[]; .domain == $host)' <<<"${apps}" >/dev/null \
-        && ! cf_cli zero-trust access applications create --body "$(jq -nc --arg host "${host}" --arg name "${name}" --arg email "${MEDIA_ACCESS_EMAIL}" '{
-          name: $name, domain: $host, type: "self_hosted", session_duration: "24h",
-          policies: [{name: "owner", decision: "allow", include: [{email: {email: $email}}]}]
-        }')" >/dev/null; then
-        warn "Skipped ${host}: could not create its Cloudflare Access application."
-        note "\`${host}\` was not published because its Cloudflare Access application could not be created. Check that the API token has the Access permission, then re-run setup.sh."
-        continue
-      fi
-    fi
-
-    if ! jq -e --arg host "${host}" 'any(.ingress[]; .hostname == $host)' <<<"${old_config}" >/dev/null; then
-      new_rules="$(jq -c --arg host "${host}" --arg service "http://${MEDIA_HOST}:${port}" \
-        '. + [{hostname: $host, service: $service}]' <<<"${new_rules}")" || return 1
-    fi
-    [[ "$(jq 'length' <<<"${record}")" == 0 ]] && add_dns+=("${host}")
-    done_hosts+=("${host}")
-  done
-
-  if [[ "$(jq 'length' <<<"${new_rules}")" != 0 ]]; then
-    if ! tunnel_add_rules "${tunnel}" "${old_config}" "${new_rules}"; then
-      note "${manual}"
-      return 0
-    fi
-  fi
-  for host in ${add_dns[@]+"${add_dns[@]}"}; do
-    if ! cf_cli dns records create --zone "${zone}" --body "$(jq -nc --arg host "${host}" --arg target "${tunnel}.cfargotunnel.com" \
-      '{type: "CNAME", name: $host, content: $target, proxied: true}')" >/dev/null; then
-      warn "Could not create the DNS record for ${host}."
-      note "Create a proxied CNAME for \`${host}\` pointing to the tunnel, or re-publish it in the dashboard."
-      done_hosts=("${done_hosts[@]/#${host}/}")
-    fi
-  done
-  for host in ${done_hosts[@]+"${done_hosts[@]}"}; do
-    [[ -n "${host}" ]] && touch "${MEDIA_STATE_DIR}/hostname-${host}" && log "Published https://${host}"
-  done
-  return 0
-}
-
-# -----------------------------------------------------------------------------
 # Things only a person can decide or do; re-checked on every run.
 # -----------------------------------------------------------------------------
 check_media_pending() {
@@ -532,12 +375,12 @@ check_media_pending() {
   count="$(API_HEADER="X-Api-Key: ${PROWLARR_API_KEY}" api GET \
     "http://${MEDIA_HOST}:${PROWLARR_PORT}/api/v1/indexer" | jq 'length' || true)"
   if [[ "${count}" == "0" ]]; then
-    note "Add indexers in Prowlarr (http://localhost:${PROWLARR_PORT} > Indexers > Add Indexer). They sync to Sonarr and Radarr automatically. For an indexer behind Cloudflare, add the \`flaresolverr\` tag."
+    note "Add indexers in Prowlarr (https://prowlarr.${DOMAIN} > Indexers > Add Indexer). They sync to Sonarr and Radarr automatically. For an indexer behind Cloudflare, add the \`flaresolverr\` tag."
   fi
 
   status="$(api GET "http://${MEDIA_HOST}:${READMEABOOK_PORT}/api/setup/status" | jq -r '.setupComplete' || true)"
   if [[ "${status}" != "true" ]]; then
-    note "After adding indexers, finish the ReadMeABook wizard at http://localhost:${READMEABOOK_PORT}. It needs choices only you can make, such as which indexers to use and your Audible region. Use these values:
+    note "After adding indexers, finish the ReadMeABook wizard at https://readmeabook.${DOMAIN}. It needs choices only you can make, such as which indexers to use and your Audible region. Use these values:
     - Backend: Audiobookshelf, \`http://audiobookshelf:13378\`, library \`Audiobooks\`. Create the API token in Audiobookshelf under Settings > Users > ${MEDIA_ADMIN_USER}.
     - Prowlarr: \`http://prowlarr:9696\`, API key \`PROWLARR_API_KEY\` from \`.env\`.
     - qBittorrent: \`http://qbittorrent:${QBITTORRENT_PORT}\`, user \`${MEDIA_ADMIN_USER}\`, password \`MEDIA_ADMIN_PASSWORD\` from \`.env\`.
@@ -550,24 +393,24 @@ check_media_pending() {
 }
 
 configure_media() {
-  MEDIA_HOST="${MEDIA_BIND_IP}"
-  [[ "${MEDIA_HOST}" == "0.0.0.0" ]] && MEDIA_HOST="127.0.0.1"
   MEDIA_STATE_DIR="${MEDIA_CONFIG_DIR}/.setup-state"
   MEDIA_TMP="$(mktemp -d)"
+  # Holds login cookies, so remove it even if setup stops early.
+  trap 'rm -rf "${MEDIA_TMP}"' EXIT
   mkdir -p "${MEDIA_STATE_DIR}"
 
   local see_login="Sign in with \`MEDIA_ADMIN_USER\` and \`MEDIA_ADMIN_PASSWORD\` from \`.env\` where the app already has them."
 
   run_step sonarr "Sonarr" \
-    "Configure Sonarr at http://localhost:${SONARR_PORT}: root folder \`/data/media/tv\`. ${see_login}" \
+    "Configure Sonarr at https://sonarr.${DOMAIN}: root folder \`/data/media/tv\`. ${see_login}" \
     configure_arr Sonarr "${SONARR_PORT}" "${SONARR_API_KEY}" /data/media/tv
   run_step radarr "Radarr" \
-    "Configure Radarr at http://localhost:${RADARR_PORT}: root folder \`/data/media/movies\`. ${see_login}" \
+    "Configure Radarr at https://radarr.${DOMAIN}: root folder \`/data/media/movies\`. ${see_login}" \
     configure_arr Radarr "${RADARR_PORT}" "${RADARR_API_KEY}" /data/media/movies
 
   if [[ -n "${VPN_SERVICE_PROVIDER:-}" ]]; then
     run_step qbittorrent "qBittorrent" \
-      "Configure qBittorrent at http://localhost:${QBITTORRENT_PORT}: its temporary password is in \`docker logs qbittorrent\`. Set the save path to \`/data/torrents/complete\`, the incomplete path to \`/data/torrents/incomplete\`, and the login from \`.env\`. If it isn't responding, check \`docker logs gluetun\`." \
+      "Configure qBittorrent at https://qbittorrent.${DOMAIN}: its temporary password is in \`docker logs qbittorrent\`. Set the save path to \`/data/torrents/complete\`, the incomplete path to \`/data/torrents/incomplete\`, and the login from \`.env\`. If it isn't responding, check \`docker logs gluetun\`." \
       configure_qbittorrent
     run_step sonarr-client "qBittorrent in Sonarr" \
       "In Sonarr, add a qBittorrent download client: host \`qbittorrent\`, port \`${QBITTORRENT_PORT}\`, category \`tv\`." \
@@ -581,25 +424,20 @@ configure_media() {
   fi
 
   run_step prowlarr "Prowlarr" \
-    "Configure Prowlarr at http://localhost:${PROWLARR_PORT}: under Settings > Apps add Sonarr (\`http://sonarr:8989\`) and Radarr (\`http://radarr:7878\`) with the API keys from \`.env\`, using \`http://prowlarr:9696\` as the Prowlarr server. ${see_login}" \
+    "Configure Prowlarr at https://prowlarr.${DOMAIN}: under Settings > Apps add Sonarr (\`http://sonarr:8989\`) and Radarr (\`http://radarr:7878\`) with the API keys from \`.env\`, using \`http://prowlarr:9696\` as the Prowlarr server. ${see_login}" \
     configure_prowlarr
   run_step flaresolverr "FlareSolverr in Prowlarr" \
     "In Prowlarr under Settings > Indexers, add a FlareSolverr proxy with host \`http://flaresolverr:8191/\` and the tag \`flaresolverr\`." \
     configure_flaresolverr
   run_step jellyfin "Jellyfin" \
-    "Finish the Jellyfin wizard at http://localhost:${JELLYFIN_PORT}, then add the libraries \`/data/media/movies\` and \`/data/media/tv\`." \
+    "Finish the Jellyfin wizard at https://jellyfin.${DOMAIN}, then add the libraries \`/data/media/movies\` and \`/data/media/tv\`." \
     configure_jellyfin
   run_step audiobookshelf "Audiobookshelf" \
-    "Finish setup in Audiobookshelf at http://localhost:${AUDIOBOOKSHELF_PORT}, then add the libraries \`/data/media/audiobooks\` and \`/data/media/books\`." \
+    "Finish setup in Audiobookshelf at https://audiobookshelf.${DOMAIN}, then add the libraries \`/data/media/audiobooks\` and \`/data/media/books\`." \
     configure_audiobookshelf
   run_step seerr "Seerr" \
-    "Finish the Seerr wizard at http://localhost:${SEERR_PORT}: Jellyfin at \`http://jellyfin:8096\`, Sonarr at \`sonarr:8989\` with root \`/data/media/tv\`, Radarr at \`radarr:7878\` with root \`/data/media/movies\`." \
+    "Finish the Seerr wizard at https://seerr.${DOMAIN}: Jellyfin at \`http://jellyfin:8096\`, Sonarr at \`sonarr:8989\` with root \`/data/media/tv\`, Radarr at \`radarr:7878\` with root \`/data/media/movies\`." \
     configure_seerr
 
-  if [[ -n "${MEDIA_DOMAIN:-}" ]]; then
-    publish_media_hostnames || warn "Publishing hostnames stopped early. Re-run setup.sh to retry."
-  fi
-
   check_media_pending
-  rm -rf "${MEDIA_TMP}"
 }
