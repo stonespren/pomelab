@@ -144,10 +144,16 @@ EOF
 log "Packages ready; automatic security updates on."
 
 # Where cloudflared reaches sshd for ssh.DOMAIN, from sshd's effective config so
-# a custom Port or ListenAddress still works.
-SSH_ADDRESS="$(sshd -T 2>/dev/null | awk '$1 == "listenaddress" {print $2; exit}' || true)"
-SSH_ADDRESS="${SSH_ADDRESS/#0.0.0.0:/127.0.0.1:}"
-SSH_ADDRESS="${SSH_ADDRESS/#\[::\]:/[::1]:}"
+# a custom Port or ListenAddress still works. The first IPv4 address wins over
+# IPv6 whatever order sshd lists them in, so the route doesn't change between
+# runs, and so it isn't [::1] on hosts with IPv6 off, where sshd -T still lists
+# [::]:22 although sshd can't listen there.
+SSH_ADDRESS="$(sshd -T 2>/dev/null | awk '
+  $1 == "listenaddress" {
+    a = $2; sub(/^0\.0\.0\.0:/, "127.0.0.1:", a); sub(/^\[::\]:/, "[::1]:", a)
+    if (a ~ /^\[/) { if (v6 == "") v6 = a } else if (v4 == "") v4 = a
+  }
+  END { print (v4 != "" ? v4 : v6) }' || true)"
 SSH_ADDRESS="${SSH_ADDRESS:-127.0.0.1:22}"
 
 # Key-only SSH, but never before the admin user has a key, so a fresh server
