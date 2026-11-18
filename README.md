@@ -201,6 +201,7 @@ The app ports listen on `127.0.0.1` by default. To reach them directly from home
 ## Updating
 
 - **Media apps and cloudflared:** re-run `sudo ./setup.sh`. It pulls the latest images and recreates containers that changed.
+- **A server set up before the media stack** (Nextcloud and cloudflared only, AWS CLI cron backup): pull, fill in the "Required" section of `.env` (your old values stay), then run `sudo ./scripts/prepare-existing-server.sh` and straight after it `sudo ./setup.sh`. The script renames the old S3 settings, sets `TUNNEL_NAME` so the existing tunnel is reused, removes the old cron job and removes the old Compose project's two containers so the new project can recreate them. Data, volumes and AIO's own containers are left alone, but Nextcloud is offline until `setup.sh` finishes.
 - **Nextcloud:** in the AIO interface, click **Check for updates**. AIO backs up, updates and restarts its containers.
 - **Debian:** security updates install automatically.
 
@@ -256,7 +257,8 @@ AIO starts its own containers (`nextcloud-aio-*`), which `docker compose` doesn'
 │   ├── configure-cloudflare.sh  ← tunnel, routes, DNS and Access (used by setup.sh)
 │   ├── configure-media.sh       ← runs the media app steps in order (used by setup.sh)
 │   ├── media/                   ← one script per app, plus shared helpers in common.sh
-│   └── backup-to-s3.sh          ← offsite copy and restore of Nextcloud's backups
+│   ├── backup-to-s3.sh          ← offsite copy and restore of Nextcloud's backups
+│   └── prepare-existing-server.sh ← one-off prep for servers set up by the old version
 ├── .env                     ← your settings and secrets (chmod 600, not in git)
 ├── .env.example             ← template
 └── NEXT_STEPS.md            ← what is left to do (generated, not in git)
