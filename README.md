@@ -34,6 +34,7 @@ systemd timer (04:00) ── backup-to-s3.sh ──▶ S3 (copy of AIO's Borg ba
 | Radarr | `radarr.DOMAIN` (behind Access) | Movie automation |
 | Prowlarr | `prowlarr.DOMAIN` (behind Access) | Indexers |
 | qBittorrent | `qbittorrent.DOMAIN` (behind Access) | Downloads, only through the VPN |
+| SSH | `ssh.DOMAIN` (behind Access) | Shell access from anywhere. See [SSH](#ssh). |
 | AIO interface | `https://localhost:8080` over SSH only | Nextcloud admin, updates, backups |
 
 FlareSolverr (Cloudflare challenge proxy for Prowlarr), Gluetun (the VPN) and Decluttarr (removes failed and stalled downloads) run without addresses of their own.
@@ -53,7 +54,7 @@ FlareSolverr (Cloudflare challenge proxy for Prowlarr), Gluetun (the VPN) and De
 | Seerr | Jellyfin login and libraries, Sonarr and Radarr | Adjusting the default quality profile if you want to |
 | ReadMeABook | Container and shared paths | Its setup wizard, which needs your indexer choices |
 | Decluttarr | API keys and qBittorrent login, in test mode | Turning off test mode after reviewing its logs |
-| Debian | Docker, automatic security updates | |
+| Debian | Docker, OpenSSH server, key-only SSH, automatic security updates | Adding your SSH key, if the server doesn't have one yet |
 
 Each media app is configured once and then left alone, so changes you make in its UI are kept. To reconfigure one, delete its marker in `MEDIA_CONFIG_DIR/.setup-state/` and re-run `setup.sh`. If a step fails, setup carries on and adds the manual instructions to `NEXT_STEPS.md`.
 
@@ -132,12 +133,27 @@ Then work through `NEXT_STEPS.md` and re-run `sudo ./setup.sh` to see what is le
 
 - the tunnel's token is in `.env` for the `cloudflared` container;
 - each app's route is in the tunnel's config, followed by a catch-all 404. Routes for other hostnames, such as ones you add in the dashboard, are kept;
-- Sonarr, Radarr, Prowlarr and qBittorrent each have a Cloudflare Access app allowing only `ACCESS_EMAIL`, created before their hostname is published. An existing app is left as it is, so changes you make to it in the dashboard are kept;
+- Sonarr, Radarr, Prowlarr, qBittorrent and SSH each have a Cloudflare Access app allowing only `ACCESS_EMAIL`, created before their hostname is published. An existing app is left as it is, so changes you make to it in the dashboard are kept;
 - each hostname has a proxied CNAME to the tunnel. A hostname that already has a different DNS record is never overwritten: it is skipped and listed in `NEXT_STEPS.md`.
 
 Nextcloud is not behind Access because its desktop and mobile clients can't sign in through it. Jellyfin, Seerr, Audiobookshelf and ReadMeABook use their own logins so their apps keep working too.
 
 The `cf` CLI runs in a temporary `node` container, so the server doesn't need Node installed.
+
+### SSH
+
+`ssh.DOMAIN` reaches the server's SSH daemon through the tunnel, at the port and address `sshd` is configured with. `setup.sh` installs `openssh-server` if it is missing. Cloudflare Access sits in front, so you sign in to Access in a browser before SSH asks for your key, and the server needs no open port.
+
+On your computer, install [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and add this to `~/.ssh/config`:
+
+```
+Host ssh.DOMAIN
+  ProxyCommand cloudflared access ssh --hostname %h
+```
+
+Then `ssh you@ssh.DOMAIN` opens a browser for the Access code the first time, and works like normal SSH after that, including `-L` port forwarding for the AIO interface. Once it works you can close port 22 to the internet.
+
+Once the user who ran `sudo ./setup.sh` has a key in `~/.ssh/authorized_keys`, `setup.sh` turns off password login with `/etc/ssh/sshd_config.d/10-pomelab.conf`. Until then it leaves passwords on and lists adding a key in `NEXT_STEPS.md`. This applies to every account on the server, so give other users keys first. To allow passwords again, delete that file and run `sudo systemctl reload ssh`.
 
 Check [Cloudflare's terms](https://www.cloudflare.com/service-specific-terms-application-services/) before streaming a lot of video through the tunnel. To keep Jellyfin traffic at home off Cloudflare, see [LAN access](#lan-access).
 
@@ -253,8 +269,8 @@ AIO starts its own containers (`nextcloud-aio-*`), which `docker compose` doesn'
 
 ## Security notes
 
-- **No inbound ports.** The tunnel connects outward, so the firewall needs no rules for any app. Only SSH has to be reachable.
-- **Admin apps are behind Cloudflare Access** as well as their own logins. FlareSolverr has no login, so it is never published outside the Docker network.
+- **No inbound ports.** The tunnel connects outward, so the firewall needs no rules for any app. SSH also goes through the tunnel, so port 22 can be closed to the internet once `ssh.DOMAIN` works for you.
+- **Admin apps and SSH are behind Cloudflare Access** as well as their own logins. SSH only accepts keys once you have added one. FlareSolverr has no login, so it is never published outside the Docker network.
 - **The AIO interface is SSH-only.** It is bound to `127.0.0.1` and has no route through the tunnel.
 - **qBittorrent only runs through the VPN.** A VPN hides your IP but doesn't change what you're allowed to download.
 - **`.env` holds every secret** (Cloudflare and S3 keys, the media admin password) and is `chmod 600`. Never commit it. The Cloudflare token can change your tunnel, DNS and Access apps, so keep it limited to this account and zone.

@@ -128,7 +128,7 @@ header "System Packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 PKGS_NEEDED=()
-for pkg in curl ca-certificates jq rclone unattended-upgrades; do
+for pkg in curl ca-certificates jq rclone unattended-upgrades openssh-server; do
   dpkg -s "${pkg}" &>/dev/null || PKGS_NEEDED+=("${pkg}")
 done
 if [[ ${#PKGS_NEEDED[@]} -gt 0 ]]; then
@@ -142,6 +142,43 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 log "Packages ready; automatic security updates on."
+
+# Where cloudflared reaches sshd for ssh.DOMAIN, from sshd's effective config so
+# a custom Port or ListenAddress still works.
+SSH_ADDRESS="$(sshd -T 2>/dev/null | awk '$1 == "listenaddress" {print $2; exit}' || true)"
+SSH_ADDRESS="${SSH_ADDRESS/#0.0.0.0:/127.0.0.1:}"
+SSH_ADDRESS="${SSH_ADDRESS/#\[::\]:/[::1]:}"
+SSH_ADDRESS="${SSH_ADDRESS:-127.0.0.1:22}"
+
+# Key-only SSH, but never before the admin user has a key, so a fresh server
+# can't lock its owner out. Debian's sshd_config reads sshd_config.d/ first and
+# the first value wins, so the low number puts this ahead of files such as
+# cloud-init's 50-cloud-init.conf. Once written, the file is left in place.
+SSH_ADMIN="${SUDO_USER:-root}"
+SSH_ADMIN_HOME="$(getent passwd "${SSH_ADMIN}" | cut -d: -f6)"
+SSH_HARDENING=/etc/ssh/sshd_config.d/10-pomelab.conf
+if [[ ! -f "${SSH_HARDENING}" ]]; then
+  if grep -Eqs '^[[:space:]]*[^#[:space:]]' "${SSH_ADMIN_HOME}"/.ssh/authorized_keys{,2}; then
+    cat > "${SSH_HARDENING}" <<'EOF'
+# Managed by setup.sh. Delete this file and reload ssh to allow passwords again.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+EOF
+    if sshd -t; then
+      systemctl reload ssh || systemctl restart ssh
+      log "SSH password login turned off; keys only."
+    else
+      rm -f "${SSH_HARDENING}"
+      warn "sshd rejected the key-only setting, so password login was left on."
+    fi
+  else
+    note "Add your SSH public key to \`${SSH_ADMIN_HOME}/.ssh/authorized_keys\` (for example with \`ssh-copy-id ${SSH_ADMIN}@<server>\`), check you can log in with it, then re-run setup.sh to turn off SSH password login."
+  fi
+fi
+if [[ "$(sshd -T 2>/dev/null | awk '$1 == "passwordauthentication" {print $2}')" == yes ]]; then
+  warn "SSH still accepts passwords."
+  [[ -f "${SSH_HARDENING}" ]] && note "SSH still accepts passwords although \`${SSH_HARDENING}\` turns them off. Check that \`/etc/ssh/sshd_config\` starts with \`Include /etc/ssh/sshd_config.d/*.conf\` and doesn't set \`PasswordAuthentication yes\` above it."
+fi
 
 # =============================================================================
 # 3. Docker
@@ -301,6 +338,7 @@ write_list() { local item; for item in "$@"; do echo "- [ ] ${item}"; done; }
   for app in Jellyfin Seerr Audiobookshelf ReadMeABook Sonarr Radarr Prowlarr qBittorrent; do
     echo "| ${app} | https://${app,,}.${DOMAIN} |"
   done
+  echo "| SSH | \`ssh ${SUDO_USER:-your-user}@ssh.${DOMAIN}\`, with cloudflared on your computer (see README.md) |"
   echo "| AIO interface | https://localhost:8080 over \`ssh -L 8080:127.0.0.1:8080 ${ssh_target}\` |"
   if [[ ${#NEXTCLOUD_STEPS[@]} -gt 0 ]]; then
     echo ""
@@ -310,7 +348,7 @@ write_list() { local item; for item in "$@"; do echo "- [ ] ${item}"; done; }
   fi
   if [[ ${#NEXT_STEPS[@]} -gt 0 ]]; then
     echo ""
-    echo "## Media and Cloudflare"
+    echo "## Server, media and Cloudflare"
     echo ""
     write_list "${NEXT_STEPS[@]}"
   fi
