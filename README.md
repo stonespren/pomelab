@@ -207,7 +207,7 @@ Only Nextcloud is backed up offsite. Media files and `MEDIA_CONFIG_DIR` are not.
 ### Restore on a new server
 
 1. Clone this repo, copy your old `.env` (or fill in a new one with the same S3 values), and run `sudo ./setup.sh`.
-2. `sudo ./backup-to-s3.sh restore` copies the archives from S3 into `BORG_BACKUP_DIR`.
+2. `sudo ./scripts/backup-to-s3.sh restore` copies the archives from S3 into `BORG_BACKUP_DIR`.
 3. Open the AIO interface over SSH, choose **Restore former AIO instance from backup**, and enter the backup directory and the Borg password.
 
 ---
@@ -236,9 +236,11 @@ AIO starts its own containers (`nextcloud-aio-*`), which `docker compose` doesn'
 /opt/pomelab/                ← this repo
 ├── compose.yaml             ← every container
 ├── setup.sh                 ← installs and reconciles everything
-├── configure-cloudflare.sh  ← tunnel, routes, DNS and Access (used by setup.sh)
-├── configure-media.sh       ← media app configuration (used by setup.sh)
-├── backup-to-s3.sh          ← offsite copy and restore of Nextcloud's backups
+├── scripts/
+│   ├── configure-cloudflare.sh  ← tunnel, routes, DNS and Access (used by setup.sh)
+│   ├── configure-media.sh       ← runs the media app steps in order (used by setup.sh)
+│   ├── media/                   ← one script per app, plus shared helpers in common.sh
+│   └── backup-to-s3.sh          ← offsite copy and restore of Nextcloud's backups
 ├── .env                     ← your settings and secrets (chmod 600, not in git)
 ├── .env.example             ← template
 └── NEXT_STEPS.md            ← what is left to do (generated, not in git)

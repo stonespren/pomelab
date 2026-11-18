@@ -202,7 +202,7 @@ log "Ready: ${NEXTCLOUD_DATADIR}, ${BORG_BACKUP_DIR}, ${MEDIA_CONFIG_DIR}, ${MED
 # =============================================================================
 header "Cloudflare"
 
-source "${SCRIPT_DIR}/configure-cloudflare.sh"
+source "${SCRIPT_DIR}/scripts/configure-cloudflare.sh"
 configure_cloudflare
 
 # =============================================================================
@@ -228,7 +228,7 @@ fi
 header "Offsite Backup"
 
 BACKUP_UNIT=nextcloud-offsite-backup
-chmod +x "${SCRIPT_DIR}/backup-to-s3.sh"
+chmod +x "${SCRIPT_DIR}/scripts/backup-to-s3.sh"
 
 cat > "/etc/systemd/system/${BACKUP_UNIT}.service" <<EOF
 # Managed by setup.sh
@@ -239,7 +239,7 @@ After=network-online.target docker.service
 
 [Service]
 Type=oneshot
-ExecStart=${SCRIPT_DIR}/backup-to-s3.sh
+ExecStart=${SCRIPT_DIR}/scripts/backup-to-s3.sh
 EOF
 
 # After AIO's daily backup, which NEXT_STEPS.md suggests scheduling for 03:00
@@ -265,7 +265,7 @@ log "Daily copy to s3://${S3_BUCKET}/${S3_PREFIX}/ scheduled for 04:00."
 # =============================================================================
 header "Media Apps"
 
-source "${SCRIPT_DIR}/configure-media.sh"
+source "${SCRIPT_DIR}/scripts/configure-media.sh"
 configure_media
 
 # =============================================================================

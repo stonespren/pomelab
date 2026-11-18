@@ -10,7 +10,7 @@
 #
 # Every app port is bound to MEDIA_BIND_IP (127.0.0.1 by default). They use each
 # app's usual port, except qBittorrent, which moves to 8090 because AIO has 8080.
-# setup.sh and configure-*.sh use the same ports, so change them together.
+# setup.sh and scripts/configure-*.sh use the same ports, so change them together.
 #
 # The media apps all see the media tree at the same /data path, so imports can use
 # hardlinks and no app needs remote path mappings:

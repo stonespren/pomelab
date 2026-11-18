@@ -8,12 +8,12 @@
 # Scheduled daily by the nextcloud-offsite-backup systemd timer (see setup.sh).
 # Run by hand:  sudo systemctl start nextcloud-offsite-backup
 # Logs:         journalctl -u nextcloud-offsite-backup
-# Restore:      sudo ./backup-to-s3.sh restore   (copies the archives back from S3)
+# Restore:      sudo ./scripts/backup-to-s3.sh restore   (copies the archives back from S3)
 # =============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.env"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${REPO_DIR}/.env"
 
 [[ -f "${ENV_FILE}" ]] || { echo "ERROR: ${ENV_FILE} not found" >&2; exit 1; }
 set -a; source "${ENV_FILE}"; set +a
