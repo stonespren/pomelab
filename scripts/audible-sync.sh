@@ -27,11 +27,25 @@ set -a; source "${ENV_FILE}"; set +a
 AUDIBLE_LOCALE="${AUDIBLE_LOCALE:-us}"
 
 COMPOSE=(docker compose --project-directory "${REPO_DIR}")
-ACCOUNTS="${MEDIA_CONFIG_DIR}/libation/AccountsSettings.json"
+CONFIG_DIR="${MEDIA_CONFIG_DIR}/libation"
+ACCOUNTS="${CONFIG_DIR}/AccountsSettings.json"
+
+[[ -d "${CONFIG_DIR}" ]] || fail "${CONFIG_DIR} doesn't exist yet. Run setup.sh first."
 
 # Libation keeps its accounts in this file, keyed by the Audible email.
 if ! grep -qsF "\"${AUDIBLE_EMAIL}\"" "${ACCOUNTS}"; then
   [[ -t 0 ]] || fail "Signing in to Audible needs an interactive terminal. Run this script by hand."
+
+  # The sign-in writes straight to /config, so it survives the container, but
+  # refuses to start unless Libation's settings files are already there. The
+  # image's entrypoint only creates them in its own temporary copy of /config.
+  for file in Settings.json AccountsSettings.json; do
+    if [[ ! -s "${CONFIG_DIR}/${file}" ]]; then
+      echo '{}' > "${CONFIG_DIR}/${file}"
+      chown "${PUID}:${PGID}" "${CONFIG_DIR}/${file}"
+    fi
+  done
+
   echo "Signing in to Audible as ${AUDIBLE_EMAIL} (${AUDIBLE_LOCALE}). Open the link below,"
   echo "sign in, then paste the address your browser ends up on."
   "${COMPOSE[@]}" run --rm libation LibationCli login-external \

@@ -311,11 +311,11 @@ services:
     user: "${PUID:?run setup.sh}:${PGID:?run setup.sh}"
     environment:
       TZ: "${TZ:?run setup.sh}"
-      LIBATION_BOOKS_DIR: /data/media/audiobooks
     volumes:
       # Accounts, settings and Libation's database
       - ${MEDIA_CONFIG_DIR:?run setup.sh}/libation:/config
-      - ${MEDIA_DATA_DIR:?run setup.sh}/media:/data/media
+      # Libation saves books to /data, and warns unless /data itself is a mount.
+      - ${MEDIA_DATA_DIR:?run setup.sh}/media/audiobooks:/data
     networks: [media]
 
   # ---------------------------------------------------------------------------
