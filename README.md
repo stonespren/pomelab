@@ -37,7 +37,7 @@ systemd timer (04:00) ── backup-to-s3.sh ──▶ S3 (copy of AIO's Borg ba
 | SSH | `ssh.DOMAIN` (behind Access) | Shell access from anywhere. See [SSH](#ssh). |
 | AIO interface | `https://localhost:8080` over SSH only | Nextcloud admin, updates, backups |
 
-FlareSolverr (Cloudflare challenge proxy for Prowlarr), Gluetun (the VPN) and Decluttarr (removes failed and stalled downloads) run without addresses of their own.
+FlareSolverr (Cloudflare challenge proxy for Prowlarr), Gluetun (the VPN), Decluttarr (removes failed and stalled downloads) and Libation (downloads your Audible library) run without addresses of their own.
 
 ### What setup.sh does for you
 
@@ -54,6 +54,7 @@ FlareSolverr (Cloudflare challenge proxy for Prowlarr), Gluetun (the VPN) and De
 | Seerr | Jellyfin login and libraries, Sonarr and Radarr | Adjusting the default quality profile if you want to |
 | ReadMeABook | Container and shared paths | Its setup wizard, which needs your indexer choices |
 | Decluttarr | API keys and qBittorrent login, in test mode | Turning off test mode after reviewing its logs |
+| Libation | Image and download folder | Running `scripts/audible-sync.sh` when you want to sync. See [Audible](#audible). |
 | Debian | Docker, OpenSSH server, key-only SSH, automatic security updates | Adding your SSH key, if the server doesn't have one yet |
 
 Each media app is configured once and then left alone, so changes you make in its UI are kept. To reconfigure one, delete its marker in `MEDIA_CONFIG_DIR/.setup-state/` and re-run `setup.sh`. If a step fails, setup carries on and adds the manual instructions to `NEXT_STEPS.md`.
@@ -181,6 +182,33 @@ All qBittorrent traffic goes through the `gluetun` container, whose firewall blo
 
 Only qBittorrent uses the VPN. Nextcloud, the tunnel and the other apps use your normal connection.
 
+### Audible
+
+Libation downloads the audiobooks you own on Audible into `/data/media/audiobooks`, where Audiobookshelf picks them up. It has no web interface and only runs when you start it. Set `AUDIBLE_EMAIL` and `AUDIBLE_LOCALE` in `.env`, then sync whenever you want:
+
+```bash
+sudo ./scripts/audible-sync.sh
+```
+
+It downloads anything new, shows its progress and exits. The first run signs you in: Amazon won't accept a password from a script, so it prints a link instead. Open it, sign in, and paste the address your browser ends up on back into the terminal. Later runs reuse that sign-in.
+
+To reuse an account from the Libation desktop app instead, copy its `AccountsSettings.json` (and `libation-master.key`, if it has one) into `MEDIA_CONFIG_DIR/libation/`.
+
+Libation keeps its state in `MEDIA_CONFIG_DIR/libation/`: the Audible sign-in in `AccountsSettings.json`, and a database of your library and what it has already downloaded. To sign in again, delete only the sign-in:
+
+```bash
+sudo rm /opt/media/config/libation/AccountsSettings.json   # your MEDIA_CONFIG_DIR
+sudo ./scripts/audible-sync.sh
+```
+
+Do this when:
+
+- a sync fails because the sign-in has expired or Audible rejects it (the script points here when a sync fails);
+- you change `AUDIBLE_EMAIL` or `AUDIBLE_LOCALE`. A new email signs in on its own, but the old account stays and keeps syncing until its file is deleted;
+- you deregistered this device in your Amazon account.
+
+Delete the whole `libation/` directory only to stop using Libation or to start over. That also deletes the database, so the next sync scans your whole library again and may download books that are already in Audiobookshelf a second time. Books already downloaded to `MEDIA_DATA_DIR` are kept either way.
+
 ### LAN access
 
 The app ports listen on `127.0.0.1` by default. To reach them directly from home, for example so a TV streams from Jellyfin without going through Cloudflare, set `MEDIA_BIND_IP` to the server's LAN address and re-run `setup.sh`. Docker's published ports bypass `ufw`, so this exposes every app port to anything that can reach that address.
@@ -254,6 +282,7 @@ AIO starts its own containers (`nextcloud-aio-*`), which `docker compose` doesn'
 ├── compose.yaml             ← every container
 ├── setup.sh                 ← installs and reconciles everything
 ├── scripts/
+│   ├── audible-sync.sh          ← downloads new Audible purchases, when you run it
 │   ├── configure-cloudflare.sh  ← tunnel, routes, DNS and Access (used by setup.sh)
 │   ├── configure-media.sh       ← runs the media app steps in order (used by setup.sh)
 │   ├── media/                   ← one script per app, plus shared helpers in common.sh

@@ -299,6 +299,26 @@ services:
     networks: [media]
 
   # ---------------------------------------------------------------------------
+  # Audible
+  # ---------------------------------------------------------------------------
+  # Downloads your Audible library into the Audiobooks folder. It has no web UI
+  # or port, and only runs when you start it with `sudo ./scripts/audible-sync.sh`,
+  # which signs in if needed, syncs once and exits. Nothing turns on its
+  # profile, so `up` never starts it.
+  libation:
+    image: rmcrackan/libation:latest
+    profiles: [libation]
+    user: "${PUID:?run setup.sh}:${PGID:?run setup.sh}"
+    environment:
+      TZ: "${TZ:?run setup.sh}"
+      LIBATION_BOOKS_DIR: /data/media/audiobooks
+    volumes:
+      # Accounts, settings and Libation's database
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/libation:/config
+      - ${MEDIA_DATA_DIR:?run setup.sh}/media:/data/media
+    networks: [media]
+
+  # ---------------------------------------------------------------------------
   # Playback
   # ---------------------------------------------------------------------------
   jellyfin:

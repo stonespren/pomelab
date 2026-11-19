@@ -225,7 +225,7 @@ mkdir -p "${BORG_BACKUP_DIR}"
 # readmeabook's directories are created and owned by its own entrypoint.
 for dir in \
   "${MEDIA_CONFIG_DIR}" \
-  "${MEDIA_CONFIG_DIR}"/{prowlarr,qbittorrent,sonarr,radarr,jellyfin,audiobookshelf} \
+  "${MEDIA_CONFIG_DIR}"/{prowlarr,qbittorrent,sonarr,radarr,jellyfin,audiobookshelf,libation} \
   "${MEDIA_CONFIG_DIR}"/audiobookshelf/{config,metadata} \
   "${MEDIA_DATA_DIR}" \
   "${MEDIA_DATA_DIR}"/{torrents,media} \
@@ -255,7 +255,9 @@ header "Containers"
 
 COMPOSE=(docker compose --project-directory "${SCRIPT_DIR}")
 log "Pulling images..."
-"${COMPOSE[@]}" pull --quiet
+# Libation's profile is never active, since it only runs on demand, so name it
+# here to keep its image up to date too.
+"${COMPOSE[@]}" --profile libation pull --quiet
 # gluetun stays unhealthy with bad VPN settings, which fails this command. That
 # keeps qBittorrent stopped but shouldn't stop the rest of setup.
 if "${COMPOSE[@]}" up -d --remove-orphans; then

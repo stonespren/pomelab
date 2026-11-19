@@ -19,7 +19,7 @@ MEDIA_SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/media" && pwd)"
 
 # shellcheck source=media/common.sh
 source "${MEDIA_SCRIPTS_DIR}/common.sh"
-for app in sonarr radarr qbittorrent prowlarr flaresolverr jellyfin audiobookshelf seerr readmeabook decluttarr; do
+for app in sonarr radarr qbittorrent prowlarr flaresolverr jellyfin audiobookshelf seerr readmeabook decluttarr libation; do
   # shellcheck source=/dev/null
   source "${MEDIA_SCRIPTS_DIR}/${app}.sh"
 done
@@ -46,4 +46,5 @@ configure_media() {
   prowlarr_pending
   readmeabook_pending
   decluttarr_pending
+  libation_pending
 }
