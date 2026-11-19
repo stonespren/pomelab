@@ -73,8 +73,9 @@ cloudflare_access_app() {
   local host="$1" name="$2" apps body
   apps="$(cf_cli zero-trust access applications list --domain "${host}" --exact | jq -c "${JQ_LIST}")" || return 1
   jq -e --arg host "${host}" 'any(.[]; .domain == $host)' <<<"${apps}" >/dev/null && return 0
+  # A long session because each admin app has its own login behind Access too.
   body="$(jq -nc --arg host "${host}" --arg name "${name}" --arg email "${ACCESS_EMAIL}" '{
-    name: $name, domain: $host, type: "self_hosted", session_duration: "24h",
+    name: $name, domain: $host, type: "self_hosted", session_duration: "720h",
     policies: [{name: "owner", decision: "allow", include: [{email: {email: $email}}]}]
   }')" || return 1
   cf_cli zero-trust access applications create --body "${body}" >/dev/null
