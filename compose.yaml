@@ -9,12 +9,14 @@
 # starting this file by hand on a new server.
 #
 # Every app port is bound to MEDIA_BIND_IP (127.0.0.1 by default). They use each
-# app's usual port, except qBittorrent, which moves to 8090 because AIO has 8080.
+# app's usual port, except qBittorrent, which moves to 8090 because AIO has 8080,
+# and SABnzbd, which keeps 8080 inside gluetun's network but is published on 8085.
 # setup.sh and scripts/configure-*.sh use the same ports, so change them together.
 #
 # The media apps all see the media tree at the same /data path, so imports can use
 # hardlinks and no app needs remote path mappings:
 #   /data/torrents/{incomplete,complete}
+#   /data/usenet/{incomplete,complete}
 #   /data/media/{movies,tv,audiobooks,books}
 
 name: pomelab
@@ -101,10 +103,11 @@ services:
   # ---------------------------------------------------------------------------
   # Downloads
   # ---------------------------------------------------------------------------
-  # qBittorrent has no network of its own: all its traffic goes through gluetun,
-  # whose firewall blocks everything outside the VPN, including when it drops.
-  # Both only run under the "vpn" profile, which setup.sh turns on once
-  # VPN_SERVICE_PROVIDER is set, so qBittorrent never runs on the home connection.
+  # qBittorrent and SABnzbd have no network of their own: all their traffic goes
+  # through gluetun, whose firewall blocks everything outside the VPN, including
+  # when it drops. All three only run under the "vpn" profile, which setup.sh
+  # turns on once VPN_SERVICE_PROVIDER is set, so neither download client ever
+  # runs on the home connection.
   gluetun:
     image: qmcgaw/gluetun:v3
     container_name: gluetun
@@ -138,12 +141,14 @@ services:
         "json={\"listen_port\":0,\"current_network_interface\":\"lo\"}"
         http://127.0.0.1:8090/api/v2/app/setPreferences'
     ports:
-      # qBittorrent's web UI, published here because it shares this container's network.
+      # The download clients' web UIs, published here because they share this
+      # container's network. SABnzbd always listens on 8080 inside it.
       - "${MEDIA_BIND_IP:?run setup.sh}:8090:8090"
+      - "${MEDIA_BIND_IP:?run setup.sh}:8085:8080"
     networks:
       media:
-        # Other containers reach qBittorrent as qbittorrent:8090.
-        aliases: [qbittorrent]
+        # Other containers reach them as qbittorrent:8090 and sabnzbd:8080.
+        aliases: [qbittorrent, sabnzbd]
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
@@ -198,6 +203,29 @@ services:
           username: "${MEDIA_ADMIN_USER:?run setup.sh}"
           password: "${MEDIA_ADMIN_PASSWORD:?run setup.sh}"
     networks: [media]
+
+  # Usenet downloads, through gluetun like qBittorrent.
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    profiles: [vpn]
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+        restart: true
+    environment:
+      <<: *lsio-env
+    volumes:
+      - ${MEDIA_CONFIG_DIR:?run setup.sh}/sabnzbd:/config
+      - ${MEDIA_DATA_DIR:?run setup.sh}:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8080/api?mode=version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
 
   # ---------------------------------------------------------------------------
   # Automation

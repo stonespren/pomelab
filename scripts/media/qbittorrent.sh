@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # =============================================================================
 # media/qbittorrent.sh — qBittorrent: login and paths, its download client in
-# Sonarr and Radarr, and a check on every run that it uses the VPN.
+# Sonarr and Radarr, and a check on every run that the VPN is in use.
 #
 # Sourced by configure-media.sh. Runs after Sonarr and Radarr are set up.
 # =============================================================================
@@ -70,26 +70,28 @@ arr_add_qbittorrent() {
   fi
 }
 
-# Confirm on every run that qBittorrent is not using the home connection.
+# Confirm on every run that qBittorrent, and SABnzbd with it, are not using the
+# home connection. They share gluetun's network, so one check covers both.
 check_vpn() {
   local server_ip qbit_ip
+  [[ -n "${VPN_SERVICE_PROVIDER:-}" ]] || return 0
   server_ip="$(curl -fsS --max-time 20 https://ipinfo.io/ip || true)"
   qbit_ip="$(docker exec qbittorrent curl -fsS --max-time 20 https://ipinfo.io/ip 2>/dev/null || true)"
   if [[ -z "${server_ip}" || -z "${qbit_ip}" ]]; then
     warn "Could not compare qBittorrent's public IP with the server's."
     note "Confirm qBittorrent is using the VPN: \`docker exec qbittorrent curl -s https://ipinfo.io/ip\` must differ from \`curl -s https://ipinfo.io/ip\` on the server. If gluetun is unhealthy, check \`docker logs gluetun\`."
   elif [[ "${server_ip}" == "${qbit_ip}" ]]; then
-    warn "qBittorrent is using the server's own public IP. Stopping it."
-    docker stop qbittorrent >/dev/null || warn "Could not stop qbittorrent. Stop it by hand."
-    note "**qBittorrent was stopped because its traffic was not going through the VPN.** Check \`docker logs gluetun\` and your VPN settings in \`.env\`, then re-run setup.sh."
+    warn "qBittorrent is using the server's own public IP. Stopping it and SABnzbd."
+    docker stop qbittorrent sabnzbd >/dev/null || warn "Could not stop qbittorrent and sabnzbd. Stop them by hand."
+    note "**qBittorrent and SABnzbd were stopped because their traffic was not going through the VPN.** Check \`docker logs gluetun\` and your VPN settings in \`.env\`, then re-run setup.sh."
   else
-    log "VPN: qBittorrent's public IP differs from the server's."
+    log "VPN: qBittorrent and SABnzbd's public IP differs from the server's."
   fi
 }
 
 setup_qbittorrent() {
   if [[ -z "${VPN_SERVICE_PROVIDER:-}" ]]; then
-    note "Set up the VPN: fill in \`VPN_SERVICE_PROVIDER\` and its credentials in \`.env\`, then re-run setup.sh. qBittorrent and Decluttarr stay stopped until then, so nothing can download over your home connection."
+    note "Set up the VPN: fill in \`VPN_SERVICE_PROVIDER\` and its credentials in \`.env\`, then re-run setup.sh. qBittorrent, SABnzbd and Decluttarr stay stopped until then, so nothing can download over your home connection."
     return 0
   fi
 
@@ -102,5 +104,4 @@ setup_qbittorrent() {
   run_step radarr-client "qBittorrent in Radarr" \
     "In Radarr, add a qBittorrent download client: host \`qbittorrent\`, port \`${QBITTORRENT_PORT}\`, category \`movies\`." \
     arr_add_qbittorrent "${RADARR_PORT}" "${RADARR_API_KEY}" movieCategory movies
-  check_vpn
 }

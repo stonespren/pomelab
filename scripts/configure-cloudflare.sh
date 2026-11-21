@@ -31,6 +31,7 @@ cloudflare_routes() {
     "radarr:http://${MEDIA_HOST}:${RADARR_PORT}:access"
     "prowlarr:http://${MEDIA_HOST}:${PROWLARR_PORT}:access"
     "qbittorrent:http://${MEDIA_HOST}:${QBITTORRENT_PORT}:access"
+    "sabnzbd:http://${MEDIA_HOST}:${SABNZBD_PORT}:access"
     # Clients connect with `cloudflared access ssh` as their ProxyCommand.
     "ssh:ssh://${SSH_ADDRESS}:access"
   )

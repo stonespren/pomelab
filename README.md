@@ -33,7 +33,8 @@ systemd timer (04:00) ── backup-to-s3.sh ──▶ S3 (copy of AIO's Borg ba
 | Sonarr | `sonarr.DOMAIN` (behind Access) | TV automation |
 | Radarr | `radarr.DOMAIN` (behind Access) | Movie automation |
 | Prowlarr | `prowlarr.DOMAIN` (behind Access) | Indexers |
-| qBittorrent | `qbittorrent.DOMAIN` (behind Access) | Downloads, only through the VPN |
+| qBittorrent | `qbittorrent.DOMAIN` (behind Access) | Torrent downloads, only through the VPN |
+| SABnzbd | `sabnzbd.DOMAIN` (behind Access) | Usenet downloads, only through the VPN |
 | SSH | `ssh.DOMAIN` (behind Access) | Shell access from anywhere. See [SSH](#ssh). |
 | AIO interface | `https://localhost:8080` over SSH only | Nextcloud admin, updates, backups |
 
@@ -47,7 +48,8 @@ FlareSolverr (Cloudflare challenge proxy for Prowlarr), Gluetun (the VPN), Declu
 | Nextcloud | Container, data and backup directories, daily offsite copy | Entering the domain and turning on backups in the AIO interface |
 | Gluetun | VPN container, a public IP check on every run | Choosing a VPN provider |
 | qBittorrent | Login, download paths | |
-| Sonarr, Radarr | Login, root folder, qBittorrent client | |
+| SABnzbd | Login, download paths, `tv` and `movies` categories | Adding your Usenet provider |
+| Sonarr, Radarr | Login, root folder, qBittorrent and SABnzbd clients | |
 | Prowlarr | Login, Sonarr and Radarr sync, FlareSolverr proxy | Choosing indexers |
 | Jellyfin | Admin account, Movies and Shows libraries | |
 | Audiobookshelf | Admin account, Audiobooks and Ebooks libraries | |
@@ -72,7 +74,8 @@ You need:
 | A Cloudflare Zero Trust organization | Free for up to 50 users. Open [one.cloudflare.com](https://one.cloudflare.com/) once and pick a team name. Access apps can't be created until this exists. |
 | An S3-compatible bucket | AWS S3, Cloudflare R2, Backblaze B2 and so on |
 | Disk space for media | `MEDIA_DATA_DIR` must be one filesystem, so imports can use hardlinks |
-| A VPN subscription (optional) | Needed before qBittorrent will run. See [VPN](#vpn). |
+| A VPN subscription (optional) | Needed before qBittorrent and SABnzbd will run. See [VPN](#vpn). |
+| A Usenet provider (optional) | For SABnzbd. Usenet indexers go in Prowlarr. |
 
 ### Cloudflare API token
 
@@ -134,7 +137,7 @@ Then work through `NEXT_STEPS.md` and re-run `sudo ./setup.sh` to see what is le
 
 - the tunnel's token is in `.env` for the `cloudflared` container;
 - each app's route is in the tunnel's config, followed by a catch-all 404. Routes for other hostnames, such as ones you add in the dashboard, are kept;
-- Sonarr, Radarr, Prowlarr, qBittorrent and SSH each have a Cloudflare Access app allowing only `ACCESS_EMAIL`, created before their hostname is published. An existing app is left as it is, so changes you make to it in the dashboard are kept;
+- Sonarr, Radarr, Prowlarr, qBittorrent, SABnzbd and SSH each have a Cloudflare Access app allowing only `ACCESS_EMAIL`, created before their hostname is published. An existing app is left as it is, so changes you make to it in the dashboard are kept;
 - each hostname has a proxied CNAME to the tunnel. A hostname that already has a different DNS record is never overwritten: it is skipped and listed in `NEXT_STEPS.md`.
 
 Nextcloud is not behind Access because its desktop and mobile clients can't sign in through it. Jellyfin, Seerr, Audiobookshelf and ReadMeABook use their own logins so their apps keep working too.
@@ -169,18 +172,19 @@ Every app sees the media tree at the same `/data` path, so there are no remote p
 ```
 MEDIA_DATA_DIR/
 ├── torrents/{incomplete,complete}/
+├── usenet/{incomplete,complete}/
 └── media/{movies,tv,audiobooks,books}/
 ```
 
 ### VPN
 
-All qBittorrent traffic goes through the `gluetun` container, whose firewall blocks anything outside the VPN, including when the VPN drops. Set `VPN_SERVICE_PROVIDER` and its credentials in `.env`, following the [guide for your provider](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers), then re-run `setup.sh`.
+All qBittorrent and SABnzbd traffic goes through the `gluetun` container, whose firewall blocks anything outside the VPN, including when the VPN drops. Set `VPN_SERVICE_PROVIDER` and its credentials in `.env`, following the [guide for your provider](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers), then re-run `setup.sh`.
 
-- **No VPN configured:** qBittorrent and Decluttarr don't start. Everything else runs normally.
-- **On every run:** `setup.sh` compares qBittorrent's public IP with the server's and stops qBittorrent if they match.
+- **No VPN configured:** qBittorrent, SABnzbd and Decluttarr don't start. Everything else runs normally.
+- **On every run:** `setup.sh` compares qBittorrent's public IP with the server's and stops qBittorrent and SABnzbd if they match. They share gluetun's network, so they always have the same IP.
 - **Port forwarding:** without a forwarded port, downloads still work but you reach fewer peers and seed less. Router port forwarding has no effect, because peers connect through the VPN. Use `VPN_PORT_FORWARDING=on` with a provider that supports it.
 
-Only qBittorrent uses the VPN. Nextcloud, the tunnel and the other apps use your normal connection.
+Only qBittorrent and SABnzbd use the VPN. Nextcloud, the tunnel and the other apps use your normal connection. In SABnzbd, still use your Usenet provider's SSL port.
 
 ### Audible
 
@@ -223,6 +227,7 @@ The app ports listen on `127.0.0.1` by default. To reach them directly from home
 | Radarr | 7878 |
 | Prowlarr | 9696 |
 | qBittorrent | 8090 |
+| SABnzbd | 8085 |
 
 ---
 
@@ -303,7 +308,7 @@ AIO starts its own containers (`nextcloud-aio-*`), which `docker compose` doesn'
 - **No inbound ports.** The tunnel connects outward, so the firewall needs no rules for any app. SSH also goes through the tunnel, so port 22 can be closed to the internet once `ssh.DOMAIN` works for you.
 - **Admin apps and SSH are behind Cloudflare Access** as well as their own logins. SSH only accepts keys once you have added one. FlareSolverr has no login, so it is never published outside the Docker network.
 - **The AIO interface is SSH-only.** It is bound to `127.0.0.1` and has no route through the tunnel.
-- **qBittorrent only runs through the VPN.** A VPN hides your IP but doesn't change what you're allowed to download.
+- **qBittorrent and SABnzbd only run through the VPN.** A VPN hides your IP but doesn't change what you're allowed to download.
 - **`.env` holds every secret** (Cloudflare and S3 keys, the media admin password) and is `chmod 600`. Never commit it. The Cloudflare token can change your tunnel, DNS and Access apps, so keep it limited to this account and zone.
 - **The Borg password is the only key to your backups.** Keep it in a password manager, not on the server alone.
 

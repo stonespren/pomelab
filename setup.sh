@@ -100,12 +100,13 @@ default_var SONARR_API_KEY           "$(random_hex)"
 default_var RADARR_API_KEY           "$(random_hex)"
 default_var PROWLARR_API_KEY         "$(random_hex)"
 
-# qBittorrent only runs under this profile, so it can't start without a VPN
+# qBittorrent and SABnzbd only run under this profile, so they can't start without a VPN
 set_env_var COMPOSE_PROFILES "$([[ -n "${VPN_SERVICE_PROVIDER:-}" ]] && echo vpn || true)"
 
 # The apps' host ports. These must match compose.yaml.
 PROWLARR_PORT=9696
 QBITTORRENT_PORT=8090
+SABNZBD_PORT=8085
 SONARR_PORT=8989
 RADARR_PORT=7878
 SEERR_PORT=5055
@@ -225,11 +226,11 @@ mkdir -p "${BORG_BACKUP_DIR}"
 # readmeabook's directories are created and owned by its own entrypoint.
 for dir in \
   "${MEDIA_CONFIG_DIR}" \
-  "${MEDIA_CONFIG_DIR}"/{prowlarr,qbittorrent,sonarr,radarr,jellyfin,audiobookshelf,libation} \
+  "${MEDIA_CONFIG_DIR}"/{prowlarr,qbittorrent,sabnzbd,sonarr,radarr,jellyfin,audiobookshelf,libation} \
   "${MEDIA_CONFIG_DIR}"/audiobookshelf/{config,metadata} \
   "${MEDIA_DATA_DIR}" \
-  "${MEDIA_DATA_DIR}"/{torrents,media} \
-  "${MEDIA_DATA_DIR}"/torrents/{incomplete,complete} \
+  "${MEDIA_DATA_DIR}"/{torrents,usenet,media} \
+  "${MEDIA_DATA_DIR}"/{torrents,usenet}/{incomplete,complete} \
   "${MEDIA_DATA_DIR}"/media/{movies,tv,audiobooks,books}; do
   mkdir -p "${dir}"
   chown "${PUID}:${PGID}" "${dir}"
@@ -259,7 +260,7 @@ log "Pulling images..."
 # here to keep its image up to date too.
 "${COMPOSE[@]}" --profile libation pull --quiet
 # gluetun stays unhealthy with bad VPN settings, which fails this command. That
-# keeps qBittorrent stopped but shouldn't stop the rest of setup.
+# keeps qBittorrent and SABnzbd stopped but shouldn't stop the rest of setup.
 if "${COMPOSE[@]}" up -d --remove-orphans; then
   log "All containers started."
 else
@@ -343,7 +344,7 @@ write_list() { local item; for item in "$@"; do echo "- [ ] ${item}"; done; }
   echo "| App | Address |"
   echo "|---|---|"
   echo "| Nextcloud | https://cloud.${DOMAIN} |"
-  for app in Jellyfin Seerr Audiobookshelf ReadMeABook Sonarr Radarr Prowlarr qBittorrent; do
+  for app in Jellyfin Seerr Audiobookshelf ReadMeABook Sonarr Radarr Prowlarr qBittorrent SABnzbd; do
     echo "| ${app} | https://${app,,}.${DOMAIN} |"
   done
   echo "| SSH | \`ssh ${SUDO_USER:-your-user}@ssh.${DOMAIN}\`, with cloudflared on your computer (see README.md) |"
