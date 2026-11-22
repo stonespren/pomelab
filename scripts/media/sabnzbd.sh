@@ -64,6 +64,21 @@ configure_sabnzbd() {
   sabnzbd_set password "${MEDIA_ADMIN_PASSWORD}"
 }
 
+# SABnzbd only serves private addresses by default, and requests through the
+# tunnel can look external to it ("External internet access denied"). 4 is the
+# full web interface, which still shows everyone the login screen. Only done
+# once a login is set, so this never opens SABnzbd without one.
+sabnzbd_allow_tunnel() {
+  local current
+  current="$(sabnzbd_api mode=get_config section=misc)" || return 1
+  if ! jq -e '(.config.misc.username // "") != "" and (.config.misc.password // "") != ""' \
+      <<<"${current}" >/dev/null; then
+    warn "SABnzbd has no login yet, so external access was left off." >&2
+    return 1
+  fi
+  sabnzbd_set inet_exposure 4
+}
+
 # arr_add_sabnzbd PORT API_KEY CATEGORY_FIELD CATEGORY
 arr_add_sabnzbd() {
   local port="$1" key="$2" category_field="$3" category="$4"
@@ -89,6 +104,10 @@ setup_sabnzbd() {
   run_step sabnzbd "SABnzbd" \
     "Configure SABnzbd at https://sabnzbd.${DOMAIN}: under Config > Folders set the temporary folder to \`/data/usenet/incomplete\` and the completed folder to \`/data/usenet/complete\`; under Config > Categories make sure \`tv\` and \`movies\` exist; under Config > General add \`sabnzbd\` and \`sabnzbd.${DOMAIN}\` to the host whitelist and set the login from \`.env\`. If it isn't responding, check \`docker logs gluetun\`." \
     configure_sabnzbd
+  # Its own step, so servers that already ran the one above get it too.
+  run_step sabnzbd-access "SABnzbd access through the tunnel" \
+    "In SABnzbd, set a username and password under Config > General > Security, then set External internet access to \`Full Web Interface\` there. Until then, use it over SSH: \`ssh -L 8085:127.0.0.1:8085 you@server\` and browse to http://localhost:8085." \
+    sabnzbd_allow_tunnel
   run_step sonarr-sabnzbd "SABnzbd in Sonarr" \
     "In Sonarr, add a SABnzbd download client: host \`sabnzbd\`, port \`8080\`, the API key from SABnzbd's Config > General, category \`tv\`." \
     arr_add_sabnzbd "${SONARR_PORT}" "${SONARR_API_KEY}" tvCategory tv
